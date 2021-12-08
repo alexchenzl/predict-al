@@ -227,6 +227,8 @@ func (s *FakeStateDB) RevertToSnapshot(int) {
 
 }
 
+// Snapshot
+// TODO - need to implement a simple snapshot-taking and reverting mechanism
 func (s *FakeStateDB) Snapshot() int {
 	return 0
 }

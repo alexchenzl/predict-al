@@ -428,16 +428,13 @@ func opCallDataCopy(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext
 	return nil, nil
 }
 
-// TODO
-// The return data size is potentially not known when predicting, because the prediction engine doesn't really execute
-// contracts.
+// Though engine doesn't really execute contracts, the return data size may not be expected size, but it should be known
 func opReturnDataSize(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	scope.Stack.push(new(uint256.Int).SetUint64(uint64(len(interpreter.returnData))))
 	return nil, nil
 }
 
-// TODO
-// Return data may not be known because of the same reason as opReturnDataSize
+// The same as opReturnDataSize
 func opReturnDataCopy(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	var (
 		memOffset  = scope.Stack.pop()
@@ -460,8 +457,8 @@ func opReturnDataCopy(pc *uint64, interpreter *EVMInterpreter, scope *ScopeConte
 	return nil, nil
 }
 
-// Address may be unknown.
-// Size is unknown in the first found when address is known.
+// Address may not be literally known.
+// Size is unknown in the first found even when address is literally known.
 func opExtCodeSize(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	slot := scope.Stack.peek()
 	if !slot.Eq(UnknownValuePlaceHolder) {
@@ -748,18 +745,24 @@ func opJump(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byt
 func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	pos, cond := scope.Stack.pop(), scope.Stack.pop()
 
+	if !scope.Contract.validJumpdest(&pos) {
+		return nil, ErrInvalidJump
+	}
+
 	if !cond.Eq(UnknownValuePlaceHolder) {
 		if !cond.IsZero() {
-			if !scope.Contract.validJumpdest(&pos) {
-				return nil, ErrInvalidJump
-			}
 			*pc = pos.Uint64()
 		} else {
 			*pc++
 		}
 	} else {
-		// TODO, if cond is not known, how to follow both branches ?
+		// If cond is not known, need to follow both branches
+		// But if branch depth is too big, only follow non-zero branch
+		if interpreter.evm.branchDepth < RunBranchDepth {
+			interpreter.RunBranch(*pc + 1)
+		}
 
+		*pc = pos.Uint64()
 	}
 	return nil, nil
 }

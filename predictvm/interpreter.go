@@ -19,9 +19,13 @@ package predictvm
 import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
+	"github.com/holiman/uint256"
 	"hash"
 	"sync/atomic"
 )
+
+// RunBranchDepth Maximum depth of RunBranch stack. If the depth is n, there will be 2^n branches
+const RunBranchDepth int = 8
 
 // Config are the configuration options for the Interpreter
 type Config struct {
@@ -63,6 +67,7 @@ type EVMInterpreter struct {
 	readOnly   bool   // Whether to throw on stateful modifications
 	returnData []byte // Last CALL's return data for subsequent reuse
 
+	callContext *ScopeContext
 }
 
 // NewEVMInterpreter returns a new instance of the Interpreter.
@@ -137,7 +142,6 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 	}
 
 	var (
-		op          OpCode        // current opcode
 		mem         = NewMemory() // bound memory
 		stack       = newstack()  // local stack
 		callContext = &ScopeContext{
@@ -148,13 +152,8 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 		// For optimisation reason we're using uint64 as the program counter.
 		// It's theoretically possible to go above 2^64. The YP defines the PC
 		// to be uint256. Practically much less so feasible.
-		pc   = uint64(0) // program counter
-		cost uint64
-		// copies used by tracer
-		pcCopy  uint64 // needed for the deferred Tracer
-		gasCopy uint64 // for Tracer to log gas remaining before execution
-		logged  bool   // deferred Tracer should ignore already logged steps
-		res     []byte // result of the opcode execution function
+		pc = uint64(0) // program counter
+
 	)
 	// Don't move this deferrred function, it's placed before the capturestate-deferred method,
 	// so that it get's executed _after_: the capturestate needs the stacks before
@@ -163,6 +162,67 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 		returnStack(stack)
 	}()
 	contract.Input = input
+
+	in.callContext = callContext
+	return in.runOpCodes(pc)
+}
+
+// RunBranch Clone the current call context to run one JUMPI branch
+func (in *EVMInterpreter) RunBranch(pc uint64) (ret []byte, err error) {
+	// Increment the branch depth which is restricted to
+	in.evm.branchDepth++
+	defer func() { in.evm.branchDepth-- }()
+
+	callContext := in.callContext
+	var (
+		mem            = NewMemory() // bound memory
+		stack          = newstack()  // local stack
+		newCallContext = &ScopeContext{
+			Memory:   mem,
+			Stack:    stack,
+			Contract: callContext.Contract,
+		}
+	)
+
+	// Clone the current stack
+	stackLen := callContext.Stack.len()
+	if stackLen > stack.len() {
+		stack.data = make([]uint256.Int, 0, stackLen)
+	}
+	for i := 0; i < stackLen; i++ {
+		stack.push(&stack.data[i])
+	}
+
+	// Clone the memory
+	mem.lastGasCost = callContext.Memory.lastGasCost
+	mem.store = callContext.Memory.GetCopy(0, int64(callContext.Memory.Len()))
+
+	// Needs to take a snapshot of statedb so that it can be restored after this branch is finished
+	snapshot := in.evm.StateDB.Snapshot()
+
+	in.callContext = newCallContext
+
+	defer func() {
+		in.callContext = callContext
+		in.evm.StateDB.RevertToSnapshot(snapshot)
+		returnStack(stack)
+	}()
+
+	return in.runOpCodes(pc)
+}
+
+func (in *EVMInterpreter) runOpCodes(pc uint64) (ret []byte, err error) {
+	var (
+		op   OpCode // current opcode
+		cost uint64
+		// copies used by tracer
+		pcCopy  uint64 // needed for the deferred Tracer
+		gasCopy uint64 // for Tracer to log gas remaining before execution
+		logged  bool   // deferred Tracer should ignore already logged steps
+		res     []byte // result of the opcode execution function
+	)
+
+	callContext := in.callContext
 
 	if in.cfg.Debug {
 		defer func() {
@@ -187,18 +247,18 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 		}
 		if in.cfg.Debug {
 			// Capture pre-execution values for tracing.
-			logged, pcCopy, gasCopy = false, pc, contract.Gas
+			logged, pcCopy, gasCopy = false, pc, callContext.Contract.Gas
 		}
 
 		// Get the operation from the jump table and validate the stack to ensure there are
 		// enough stack items available to perform the operation.
-		op = contract.GetOp(pc)
+		op = callContext.Contract.GetOp(pc)
 		operation := in.cfg.JumpTable[op]
 		if operation == nil {
 			return nil, &ErrInvalidOpCode{opcode: op}
 		}
 		// Validate stack
-		if sLen := stack.len(); sLen < operation.minStack {
+		if sLen := callContext.Stack.len(); sLen < operation.minStack {
 			return nil, &ErrStackUnderflow{stackLen: sLen, required: operation.minStack}
 		} else if sLen > operation.maxStack {
 			return nil, &ErrStackOverflow{stackLen: sLen, limit: operation.maxStack}
@@ -210,13 +270,13 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 			// for a call operation is the value. Transferring value from one
 			// account to the others means the state is modified and should also
 			// return with an error.
-			if operation.writes || (op == CALL && stack.Back(2).Sign() != 0) {
+			if operation.writes || (op == CALL && callContext.Stack.Back(2).Sign() != 0) {
 				return nil, ErrWriteProtection
 			}
 		}
 		// Static portion of gas
 		cost = operation.constantGas // For tracing
-		if !contract.UseGas(operation.constantGas) {
+		if !callContext.Contract.UseGas(operation.constantGas) {
 			return nil, ErrOutOfGas
 		}
 
@@ -226,7 +286,7 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 		// Memory check needs to be done prior to evaluating the dynamic gas portion,
 		// to detect calculation overflows
 		if operation.memorySize != nil {
-			memSize, overflow := operation.memorySize(stack)
+			memSize, overflow := operation.memorySize(callContext.Stack)
 			if overflow {
 				return nil, ErrGasUintOverflow
 			}
@@ -241,14 +301,14 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 		// cost is explicitly set so that the capture state defer method can get the proper cost
 		if operation.dynamicGas != nil {
 			var dynamicCost uint64
-			dynamicCost, err = operation.dynamicGas(in.evm, contract, stack, mem, memorySize)
+			dynamicCost, err = operation.dynamicGas(in.evm, callContext.Contract, callContext.Stack, callContext.Memory, memorySize)
 			cost += dynamicCost // total cost, for debug tracing
-			if err != nil || !contract.UseGas(dynamicCost) {
+			if err != nil || !callContext.Contract.UseGas(dynamicCost) {
 				return nil, ErrOutOfGas
 			}
 		}
 		if memorySize > 0 {
-			mem.Resize(memorySize)
+			callContext.Memory.Resize(memorySize)
 		}
 
 		if in.cfg.Debug {

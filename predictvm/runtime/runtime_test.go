@@ -210,4 +210,35 @@ func TestAccessList(t *testing.T) {
 
 	}
 
+	{
+		// jumpi
+
+		code := []byte{
+			byte(vm.PUSH1),
+			0xf1,
+			byte(vm.SLOAD),
+			byte(vm.PUSH1),
+			0x0a,
+			byte(vm.JUMPI),
+			byte(vm.PUSH1),
+			0xf2,
+			byte(vm.SLOAD),
+			byte(vm.STOP),
+			byte(vm.JUMPDEST),
+			byte(vm.PUSH1), 0xee,
+			byte(vm.PUSH1), 0,
+			byte(vm.MSTORE),
+			byte(vm.PUSH1), 0,
+			byte(vm.PUSH1), 0x20,
+			byte(vm.MSTORE),
+			byte(vm.PUSH1), 0x40,
+			byte(vm.PUSH1), 0,
+			byte(vm.SHA3),
+			byte(vm.SLOAD),
+			byte(vm.STOP),
+		}
+		prettyPrint("Test access list.", code)
+
+	}
+
 }
