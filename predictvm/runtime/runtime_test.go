@@ -191,4 +191,23 @@ func TestAccessList(t *testing.T) {
 		prettyPrint("Test access list.", code)
 	}
 
+	{
+		// Test call
+		code := []byte{
+			byte(vm.PUSH1), 0x10,
+			byte(vm.PUSH1), 0x00,
+			byte(vm.PUSH1), 0x40,
+			byte(vm.PUSH1), 0x00,
+			byte(vm.PUSH1), 0x01,
+			byte(vm.PUSH1), 0xF0,
+			byte(vm.PUSH1), 0x01,
+			byte(vm.CALL),
+			byte(vm.RETURNDATASIZE),
+			byte(vm.STOP),
+		}
+
+		prettyPrint("Test access list.", code)
+
+	}
+
 }

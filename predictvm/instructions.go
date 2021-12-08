@@ -384,7 +384,7 @@ func opCaller(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]b
 	return nil, nil
 }
 
-// Currently suppose that all parameters of calls are known, but it's possible that not all parameters are known
+// Currently suppose that all parameters of calls are known, but it seems that Value is not necessary to be known
 func opCallValue(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	v, _ := uint256.FromBig(scope.Contract.value)
 	scope.Stack.push(v)
@@ -437,7 +437,7 @@ func opReturnDataSize(pc *uint64, interpreter *EVMInterpreter, scope *ScopeConte
 }
 
 // TODO
-// Return data is not know because of the same reason as opReturnDataSize
+// Return data may not be known because of the same reason as opReturnDataSize
 func opReturnDataCopy(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	var (
 		memOffset  = scope.Stack.pop()
@@ -502,8 +502,8 @@ func opCodeCopy(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([
 	return nil, nil
 }
 
-// ExtCodeCopy is usually used to check and analyze a contract's code. In most scenario it's replaced by ExtCodeHash now.
-// Ref https://ethereum.stackexchange.com/questions/59779/what-is-the-purpose-of-extcodecopy
+// ExtCodeCopy is usually used to check and analyze a contract's code. In most scenarios it could be replaced by
+// ExtCodeHash now. Ref https://ethereum.stackexchange.com/questions/59779/what-is-the-purpose-of-extcodecopy
 //
 // Address may be unknown, but it seems that this should never happen. If address is unknown, the codeOffset
 // would be unknown either.
@@ -580,7 +580,7 @@ func opExtCodeCopy(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext)
 func opExtCodeHash(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	slot := scope.Stack.peek()
 
-	// Address is unknown, for example, just load from another slot
+	// Address may be unknown, for example, just load from another slot
 	if !slot.Eq(UnknownValuePlaceHolder) {
 		address := common.Address(slot.Bytes20())
 
@@ -659,7 +659,7 @@ func opPop(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte
 	return nil, nil
 }
 
-// TODO - Need to make sure memory offset is always known
+// TODO - Assume memory offset is always known
 func opMload(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	v := scope.Stack.peek()
 	if v.Eq(UnknownValuePlaceHolder) {
@@ -683,6 +683,7 @@ func opMstore(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]b
 	return nil, nil
 }
 
+// TODO - If either parameter is unknown, need to return error.
 // What's the typical use case of mstore8 ? It's seldom seen in disassembly code.
 // The UnknownValuePlaceHolder is 32 bytes, may have issue with byte memory operation.
 func opMstore8(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
@@ -865,14 +866,9 @@ func opCreate2(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]
 }
 
 // TODO
-//
-// All parameters have been known, or else the engine even doesn't know which function needs to be run
-//
-// storage access
-//
-// Even if the callee is already known, the engine will enter the callee contract, the return data are still not known
-// since the engine doesn't really execute the callee contract.
-// So at the end of this function,
+// toAddr is possible to be unknown if the target contract address is stored in a storage slot.
+// value is also possible to be unknown.
+// inOffset, inSize, retOffset and retSize should not be unknown because they are known in compiling time.
 func opCall(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	stack := scope.Stack
 	// Pop gas. The actual gas in interpreter.evm.callGasTemp.
@@ -881,6 +877,20 @@ func opCall(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byt
 	gas := interpreter.evm.callGasTemp
 	// Pop other call parameters.
 	addr, value, inOffset, inSize, retOffset, retSize := stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop()
+
+	// If toAddr is unknown, ret is unknown
+	if addr.Eq(UnknownValuePlaceHolder) {
+		if retSize.Uint64() >= 32 {
+			scope.Memory.Set(retOffset.Uint64(), 32, UnknownValuePlaceHolder.Bytes())
+		}
+		return UnknownValuePlaceHolder.Bytes(), nil
+	}
+
+	// Looks like this should not happen, but need to verify
+	if inOffset.Eq(UnknownValuePlaceHolder) || inSize.Eq(UnknownValuePlaceHolder) || retOffset.Eq(UnknownValuePlaceHolder) || retSize.Eq(UnknownValuePlaceHolder) {
+		return nil, ErrUnknownMemPos
+	}
+
 	toAddr := common.Address(addr.Bytes20())
 	// Get the arguments from the memory.
 	args := scope.Memory.GetPtr(int64(inOffset.Uint64()), int64(inSize.Uint64()))
@@ -920,6 +930,20 @@ func opCallCode(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([
 	gas := interpreter.evm.callGasTemp
 	// Pop other call parameters.
 	addr, value, inOffset, inSize, retOffset, retSize := stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop()
+
+	// If toAddr is unknown, ret is unknown
+	if addr.Eq(UnknownValuePlaceHolder) {
+		if retSize.Uint64() >= 32 {
+			scope.Memory.Set(retOffset.Uint64(), 32, UnknownValuePlaceHolder.Bytes())
+		}
+		return UnknownValuePlaceHolder.Bytes(), nil
+	}
+
+	// Looks like this should not happen, but need to verify
+	if inOffset.Eq(UnknownValuePlaceHolder) || inSize.Eq(UnknownValuePlaceHolder) || retOffset.Eq(UnknownValuePlaceHolder) || retSize.Eq(UnknownValuePlaceHolder) {
+		return nil, ErrUnknownMemPos
+	}
+
 	toAddr := common.Address(addr.Bytes20())
 	// Get arguments from the memory.
 	args := scope.Memory.GetPtr(int64(inOffset.Uint64()), int64(inSize.Uint64()))
@@ -956,6 +980,20 @@ func opDelegateCall(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext
 	gas := interpreter.evm.callGasTemp
 	// Pop other call parameters.
 	addr, inOffset, inSize, retOffset, retSize := stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop()
+
+	// If toAddr is unknown, ret is unknown
+	if addr.Eq(UnknownValuePlaceHolder) {
+		if retSize.Uint64() >= 32 {
+			scope.Memory.Set(retOffset.Uint64(), 32, UnknownValuePlaceHolder.Bytes())
+		}
+		return UnknownValuePlaceHolder.Bytes(), nil
+	}
+
+	// Looks like this should not happen, but need to verify
+	if inOffset.Eq(UnknownValuePlaceHolder) || inSize.Eq(UnknownValuePlaceHolder) || retOffset.Eq(UnknownValuePlaceHolder) || retSize.Eq(UnknownValuePlaceHolder) {
+		return nil, ErrUnknownMemPos
+	}
+
 	toAddr := common.Address(addr.Bytes20())
 	// Get arguments from the memory.
 	args := scope.Memory.GetPtr(int64(inOffset.Uint64()), int64(inSize.Uint64()))
@@ -985,6 +1023,20 @@ func opStaticCall(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) 
 	gas := interpreter.evm.callGasTemp
 	// Pop other call parameters.
 	addr, inOffset, inSize, retOffset, retSize := stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop()
+
+	// If toAddr is unknown, ret is unknown
+	if addr.Eq(UnknownValuePlaceHolder) {
+		if retSize.Uint64() >= 32 {
+			scope.Memory.Set(retOffset.Uint64(), 32, UnknownValuePlaceHolder.Bytes())
+		}
+		return UnknownValuePlaceHolder.Bytes(), nil
+	}
+
+	// Looks like this should not happen, but need to verify
+	if inOffset.Eq(UnknownValuePlaceHolder) || inSize.Eq(UnknownValuePlaceHolder) || retOffset.Eq(UnknownValuePlaceHolder) || retSize.Eq(UnknownValuePlaceHolder) {
+		return nil, ErrUnknownMemPos
+	}
+
 	toAddr := common.Address(addr.Bytes20())
 	// Get arguments from the memory.
 	args := scope.Memory.GetPtr(int64(inOffset.Uint64()), int64(inSize.Uint64()))
@@ -1005,13 +1057,18 @@ func opStaticCall(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) 
 	return ret, nil
 }
 
-// TODO - needs to verify
-// The offset and size should be known in previous steps
+// The offset must be known, but size may not be known
 func opReturn(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	offset, size := scope.Stack.pop(), scope.Stack.pop()
-	if offset.Eq(UnknownValuePlaceHolder) || size.Eq(UnknownValuePlaceHolder) {
+	// Must not happen
+	if offset.Eq(UnknownValuePlaceHolder) {
 		return nil, ErrUnknownMemPos
 	}
+	// If size is not known, the return data is unknown
+	if size.Eq(UnknownValuePlaceHolder) {
+		return UnknownValuePlaceHolder.Bytes(), nil
+	}
+
 	ret := scope.Memory.GetPtr(int64(offset.Uint64()), int64(size.Uint64()))
 	return ret, nil
 }
