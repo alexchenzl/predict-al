@@ -228,7 +228,27 @@ func (s *FakeStateDB) RevertToSnapshot(int) {
 }
 
 // Snapshot
-// TODO - need to implement a simple snapshot-taking and reverting mechanism
+// TODO - implement a simple snapshot-taking and reverting mechanism
 func (s *FakeStateDB) Snapshot() int {
 	return 0
+}
+
+// Copy creates a deep, independent copy of the state.
+func (s *FakeStateDB) Copy() *FakeStateDB {
+	// Copy all the basic fields, initialize the memory ones
+	state := &FakeStateDB{
+
+		stateObjects: make(map[common.Address]*stateObject, len(s.stateObjects)),
+
+		refund: s.refund,
+
+		AccountUpdated: s.AccountUpdated,
+		StorageUpdated: s.StorageUpdated,
+		AccountDeleted: s.AccountDeleted,
+		StorageDeleted: s.StorageDeleted,
+	}
+	for key, value := range s.stateObjects {
+		state.stateObjects[key] = value.deepCopy()
+	}
+	return state
 }

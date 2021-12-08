@@ -197,14 +197,15 @@ func (in *EVMInterpreter) RunBranch(pc uint64) (ret []byte, err error) {
 	mem.lastGasCost = callContext.Memory.lastGasCost
 	mem.store = callContext.Memory.GetCopy(0, int64(callContext.Memory.Len()))
 
-	// Needs to take a snapshot of statedb so that it can be restored after this branch is finished
-	snapshot := in.evm.StateDB.Snapshot()
+	// snapshot is not implemented yet, so clone the statedb instead
+	statedb := in.evm.StateDB
+	in.evm.StateDB = in.evm.StateDB.(*FakeStateDB).Copy()
 
 	in.callContext = newCallContext
 
 	defer func() {
 		in.callContext = callContext
-		in.evm.StateDB.RevertToSnapshot(snapshot)
+		in.evm.StateDB = statedb
 		returnStack(stack)
 	}()
 
