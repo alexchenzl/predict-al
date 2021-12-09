@@ -2,9 +2,18 @@
 Prototype to predict Ethereum transactions' access lists. The project comes from [CDAP cohort-one](https://github.com/ethereum-cdap/cohort-one/issues/26).
 
 The current design is to use a simplified EVM to execute transaction payloads, and record the access list at the same time. 
-Most of the source code is based on [go-ethereum](https://github.com/ethereum/go-ethereum.git). 
+Most of the source code is based on [go-ethereum](https://github.com/ethereum/go-ethereum.git).
 
-The development is still ongoing. It can only run against very simple bytecodes currently.
+Now it can only run against very simple bytecodes.
+
+TODO:
+* Implement a state fetcher that fetches states from remote Geth nodes.
+* Run the engine repeatedly to predict more accesses after it retrieves states that predicted in last round
+* Make this engine run against massive history transactions to check whether it works well in real world
+* Refactor and optimize the implementation
+* Benchmark testing
+* ...
+
 
 
 ## Building
