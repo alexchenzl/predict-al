@@ -19,6 +19,7 @@ package runtime
 import (
 	"math"
 	"math/big"
+	"predict_acl/predictvm/fakestate"
 	"time"
 
 	vm "predict_acl/predictvm"
@@ -44,7 +45,7 @@ type Config struct {
 	EVMConfig   vm.Config
 	BaseFee     *big.Int
 
-	State     *vm.FakeStateDB
+	State     *fakestate.FakeStateDB
 	GetHashFn func(n uint64) common.Hash
 }
 
@@ -103,14 +104,14 @@ func setDefaults(cfg *Config) {
 //
 // Execute sets up an in-memory, temporary, environment for the execution of
 // the given code. It makes sure that it's restored to its original state afterwards.
-func Execute(code, input []byte, cfg *Config) ([]byte, *vm.FakeStateDB, error) {
+func Execute(code, input []byte, cfg *Config) ([]byte, *fakestate.FakeStateDB, error) {
 	if cfg == nil {
 		cfg = new(Config)
 	}
 	setDefaults(cfg)
 
 	if cfg.State == nil {
-		cfg.State = vm.NewStateDB()
+		cfg.State = fakestate.NewStateDB()
 	}
 	var (
 		address = common.BytesToAddress([]byte("contract"))
@@ -142,7 +143,7 @@ func Create(input []byte, cfg *Config) ([]byte, common.Address, uint64, error) {
 
 	if cfg.State == nil {
 		//cfg.State, _ = state.New(common.Hash{}, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
-		cfg.State = vm.NewStateDB()
+		cfg.State = fakestate.NewStateDB()
 	}
 	var (
 		vmenv  = NewEnv(cfg)

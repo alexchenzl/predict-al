@@ -43,6 +43,12 @@ type AccountResult struct {
 	Code    []byte
 }
 
+type StorageResult struct {
+	Address common.Address
+	Key     common.Hash
+	Value   []byte
+}
+
 func toBlockNumArg(number *big.Int) string {
 	if number == nil {
 		return "latest"
@@ -54,29 +60,77 @@ func toBlockNumArg(number *big.Int) string {
 	return hexutil.EncodeBig(number)
 }
 
+func buildAccountReq(reqs []rpc.BatchElem, account *common.Address, blockNumberArg string) {
+	if len(reqs) == 3 {
+		reqs[0] = rpc.BatchElem{
+			Method: "eth_getBalance",
+			Args:   []interface{}{account, blockNumberArg},
+			Result: new(hexutil.Big),
+		}
+		reqs[1] = rpc.BatchElem{
+			Method: "eth_getTransactionCount",
+			Args:   []interface{}{account, blockNumberArg},
+			Result: new(hexutil.Uint64),
+		}
+		reqs[2] = rpc.BatchElem{
+			Method: "eth_getCode",
+			Args:   []interface{}{account, blockNumberArg},
+			Result: new(hexutil.Bytes),
+		}
+	}
+}
+
+func (ec *Client) GetAccountAt(ctx context.Context, account *common.Address, blockNumber *big.Int) (*AccountResult, error) {
+	if account != nil {
+		reqs := make([]rpc.BatchElem, 3)
+
+		blockNumberArg := toBlockNumArg(blockNumber)
+		buildAccountReq(reqs[0:3], account, blockNumberArg)
+
+		if err := ec.c.BatchCallContext(ctx, reqs); err != nil {
+			return nil, err
+		}
+
+		result := &AccountResult{
+			Address: *account,
+		}
+		result.Balance = (*big.Int)(reqs[0].Result.(*hexutil.Big))
+		result.Nonce = *(*uint64)(reqs[1].Result.(*hexutil.Uint64))
+		code := *(reqs[2].Result.(*hexutil.Bytes))
+		if len(code) == 0 {
+			result.Code = nil
+		} else {
+			result.Code = code
+		}
+		return result, nil
+	}
+	return nil, nil
+}
+
+func (ec *Client) GetStorageAt(ctx context.Context, account *common.Address, key *common.Hash, blockNumber *big.Int) (*StorageResult, error) {
+	var result hexutil.Bytes
+	err := ec.c.CallContext(ctx, &result, "eth_getStorageAt", *account, *key, toBlockNumArg(blockNumber))
+	if err != nil {
+		return nil, err
+	}
+
+	storage := &StorageResult{
+		Address: *account,
+	}
+
+	storage.Key = *key
+	// Even if a storage key doesn't occur in a contract, this API will return an all-zero byte array instead of nil
+	storage.Value = result
+	return storage, err
+}
+
 func (ec *Client) GetAccountsAt(ctx context.Context, accounts []common.Address, blockNumber *big.Int) ([]AccountResult, error) {
 	if len(accounts) > 0 {
 		reqs := make([]rpc.BatchElem, len(accounts)*3)
+		blockNumberArg := toBlockNumArg(blockNumber)
 		for i := range accounts {
 			idx := i * 3
-			reqs[idx] = rpc.BatchElem{
-				Method: "eth_getBalance",
-				Args:   []interface{}{accounts[i], toBlockNumArg(blockNumber)},
-				Result: new(hexutil.Big),
-			}
-
-			reqs[idx+1] = rpc.BatchElem{
-				Method: "eth_getTransactionCount",
-				Args:   []interface{}{accounts[i], toBlockNumArg(blockNumber)},
-				Result: new(hexutil.Uint64),
-			}
-
-			reqs[idx+2] = rpc.BatchElem{
-				Method: "eth_getCode",
-				Args:   []interface{}{accounts[i], toBlockNumArg(blockNumber)},
-				Result: new(hexutil.Bytes),
-			}
-
+			buildAccountReq(reqs[idx:idx+3], &accounts[i], blockNumberArg)
 		}
 		if err := ec.c.BatchCallContext(ctx, reqs); err != nil {
 			return nil, err
@@ -104,12 +158,6 @@ func (ec *Client) GetAccountsAt(ctx context.Context, accounts []common.Address, 
 		return results, nil
 	}
 	return nil, nil
-}
-
-type StorageResult struct {
-	Address common.Address
-	Key     common.Hash
-	Value   []byte
 }
 
 func (ec *Client) GetStoragesAt(ctx context.Context, accounts []common.Address, keys []common.Hash, blockNumber *big.Int) ([]StorageResult, error) {

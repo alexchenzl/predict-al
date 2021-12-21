@@ -24,11 +24,20 @@ import (
 	"testing"
 )
 
-// Need to set the GETH_RPC_TESTING environment variable  before running these tests
-func TestGetAccount(t *testing.T) {
+func createClient() (*Client, context.Context, error) {
 	url := os.Getenv("GETH_RPC_TESTING")
 	ctx := context.Background()
 	client, err := DialContext(ctx, url)
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, ctx, nil
+}
+
+// Need to set the GETH_RPC_TESTING environment variable  before running these tests
+func TestGetAccount(t *testing.T) {
+
+	client, ctx, err := createClient()
 	if err != nil {
 		t.Fatal("Failed to create client", err)
 	}
@@ -51,18 +60,16 @@ func TestGetAccount(t *testing.T) {
 }
 
 func TestGetStorages(t *testing.T) {
-	url := os.Getenv("GETH_RPC_TESTING")
-	ctx := context.Background()
-	client, err := DialContext(ctx, url)
+	client, ctx, err := createClient()
 	if err != nil {
 		t.Fatal("Failed to create client", err)
 	}
 	defer func() { client.Close() }()
 
 	accounts := make([]common.Address, 3)
-	accounts[0] = common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec8")
+	accounts[0] = common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7")
 	accounts[1] = common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7")
-	accounts[2] = common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7")
+	accounts[2] = common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec8")
 
 	keys := make([]common.Hash, 3)
 	keys[0] = common.HexToHash("0x0")

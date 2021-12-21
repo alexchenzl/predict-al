@@ -19,6 +19,7 @@ import (
 	"gopkg.in/urfave/cli.v1"
 
 	vm "predict_acl/predictvm"
+	"predict_acl/predictvm/fakestate"
 	"predict_acl/predictvm/runtime"
 )
 
@@ -175,7 +176,7 @@ func runCmd(ctx *cli.Context) error {
 	var (
 		tracer        vm.Tracer
 		debugLogger   *vm.StructLogger
-		statedb       *vm.FakeStateDB
+		statedb       *fakestate.FakeStateDB
 		sender        = common.BytesToAddress([]byte("sender"))
 		receiver      = common.BytesToAddress([]byte("receiver"))
 		genesisConfig *core.Genesis
@@ -188,7 +189,7 @@ func runCmd(ctx *cli.Context) error {
 		tracer = vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin)
 	}
 
-	statedb = vm.NewStateDB()
+	statedb = fakestate.NewStateDB()
 	genesisConfig = new(core.Genesis)
 
 	if ctx.GlobalString(SenderFlag.Name) != "" {

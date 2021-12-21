@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"predict_acl/predictvm/fakestate"
 	"strings"
 	"time"
 
@@ -120,7 +121,7 @@ type Tracer interface {
 type StructLogger struct {
 	cfg LogConfig
 
-	storage map[common.Address]Storage
+	storage map[common.Address]fakestate.Storage
 	logs    []StructLog
 	output  []byte
 	err     error
@@ -129,7 +130,7 @@ type StructLogger struct {
 // NewStructLogger returns a new logger
 func NewStructLogger(cfg *LogConfig) *StructLogger {
 	logger := &StructLogger{
-		storage: make(map[common.Address]Storage),
+		storage: make(map[common.Address]fakestate.Storage),
 	}
 	if cfg != nil {
 		logger.cfg = *cfg
@@ -139,7 +140,7 @@ func NewStructLogger(cfg *LogConfig) *StructLogger {
 
 // Reset clears the data held by the logger.
 func (l *StructLogger) Reset() {
-	l.storage = make(map[common.Address]Storage)
+	l.storage = make(map[common.Address]fakestate.Storage)
 	l.output = make([]byte, 0)
 	l.logs = l.logs[:0]
 	l.err = nil
@@ -175,12 +176,12 @@ func (l *StructLogger) CaptureState(env *EVM, pc uint64, op OpCode, gas, cost ui
 		}
 	}
 	// Copy a snapshot of the current storage to a new container
-	var storage Storage
+	var storage fakestate.Storage
 	if !l.cfg.DisableStorage && (op == SLOAD || op == SSTORE) {
 		// initialise new changed values storage container for this contract
 		// if not present.
 		if l.storage[contract.Address()] == nil {
-			l.storage[contract.Address()] = make(Storage)
+			l.storage[contract.Address()] = make(fakestate.Storage)
 		}
 		// capture SLOAD opcodes and record the read entry in the local storage
 		if op == SLOAD && stack.len() >= 1 {
