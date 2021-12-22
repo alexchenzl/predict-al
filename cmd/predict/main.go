@@ -36,10 +36,6 @@ func NewApp(usage string) *cli.App {
 var (
 	app = NewApp("the evm command line interface")
 
-	DebugFlag = cli.BoolFlag{
-		Name:  "debug",
-		Usage: "output full trace logs",
-	}
 	CodeFlag = cli.StringFlag{
 		Name:  "code",
 		Usage: "EVM code",
@@ -90,22 +86,6 @@ var (
 	ReceiverFlag = cli.StringFlag{
 		Name:  "receiver",
 		Usage: "The transaction receiver (execution context)",
-	}
-	DisableMemoryFlag = cli.BoolTFlag{
-		Name:  "nomemory",
-		Usage: "disable memory output",
-	}
-	DisableStackFlag = cli.BoolFlag{
-		Name:  "nostack",
-		Usage: "disable stack output",
-	}
-	DisableStorageFlag = cli.BoolFlag{
-		Name:  "nostorage",
-		Usage: "disable storage output",
-	}
-	DisableReturnDataFlag = cli.BoolTFlag{
-		Name:  "noreturndata",
-		Usage: "enable return data output",
 	}
 
 	OriginCommandHelpTemplate = `{{.Name}}{{if .Subcommands}} command{{end}}{{if .Flags}} [command options]{{end}} {{.ArgsUsage}}
@@ -165,30 +145,16 @@ func runCmd(ctx *cli.Context) error {
 	glogger := log.NewGlogHandler(log.StreamHandler(os.Stderr, log.TerminalFormat(false)))
 	glogger.Verbosity(log.Lvl(ctx.GlobalInt(VerbosityFlag.Name)))
 	log.Root().SetHandler(glogger)
-	logconfig := &vm.LogConfig{
-		EnableMemory:     !ctx.GlobalBool(DisableMemoryFlag.Name),
-		DisableStack:     ctx.GlobalBool(DisableStackFlag.Name),
-		DisableStorage:   ctx.GlobalBool(DisableStorageFlag.Name),
-		EnableReturnData: !ctx.GlobalBool(DisableReturnDataFlag.Name),
-		Debug:            ctx.GlobalBool(DebugFlag.Name),
-	}
 
 	var (
 		tracer        vm.Tracer
-		debugLogger   *vm.StructLogger
 		statedb       *fakestate.FakeStateDB
 		sender        = common.BytesToAddress([]byte("sender"))
 		receiver      = common.BytesToAddress([]byte("receiver"))
 		genesisConfig *core.Genesis
 	)
 
-	debugLogger = vm.NewStructLogger(logconfig)
-	if ctx.GlobalBool(DebugFlag.Name) {
-		tracer = debugLogger
-	} else {
-		tracer = vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin)
-	}
-
+	tracer = vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin)
 	statedb = fakestate.NewStateDB()
 	genesisConfig = new(core.Genesis)
 
@@ -274,23 +240,11 @@ func runCmd(ctx *cli.Context) error {
 	}
 
 	bench := ctx.GlobalBool(BenchFlag.Name)
-	output, leftOverGas, stats, err := timedExec(bench, execFunc)
-
-	if ctx.GlobalBool(DebugFlag.Name) {
-		if debugLogger != nil {
-			fmt.Fprintln(os.Stderr, "#### TRACE ####")
-			vm.WriteTrace(os.Stderr, debugLogger.StructLogs())
-		}
-		//fmt.Fprintln(os.Stderr, "#### LOGS ####")
-		//vm.WriteLogs(os.Stderr, statedb.Logs())
-	}
+	output, _, stats, err := timedExec(bench, execFunc)
 
 	if bench {
-		fmt.Fprintf(os.Stderr, `EVM gas used:    %d
-execution time:  %v
-allocations:     %d
-allocated bytes: %d
-`, initialGas-leftOverGas, stats.time, stats.allocs, stats.bytesAllocated)
+		fmt.Fprintf(os.Stderr, "execution time: %v\n allocations: %d\n allocated bytes: %d",
+			stats.time, stats.allocs, stats.bytesAllocated)
 	}
 
 	if alTracer, ok := tracer.(*vm.AccessListTracer); ok {
@@ -316,7 +270,6 @@ func init() {
 	app.Flags = []cli.Flag{
 		BenchFlag,
 		CreateFlag,
-		DebugFlag,
 		VerbosityFlag,
 		CodeFlag,
 		CodeFileFlag,
@@ -327,10 +280,6 @@ func init() {
 		GenesisFlag,
 		SenderFlag,
 		ReceiverFlag,
-		DisableMemoryFlag,
-		DisableStackFlag,
-		DisableStorageFlag,
-		DisableReturnDataFlag,
 	}
 
 	app.Commands = []cli.Command{

@@ -3,11 +3,10 @@ package fakestate
 import (
 	"context"
 	"errors"
-	"fmt"
-	"github.com/ethereum/go-ethereum/common"
 	"math/big"
 	"sync"
-	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 type StateRequest struct {
@@ -23,7 +22,7 @@ type StateFetcher struct {
 	maxProcs int
 	url      string
 
-	lock sync.Mutex
+	lock sync.Mutex // Protect statdb
 
 	req  chan *StateRequest
 	stop chan struct{} // Channel to interrupt processing
@@ -78,9 +77,9 @@ func (sf *StateFetcher) Fetch(accounts []*common.Address, keys []*common.Hash) e
 
 func (sf *StateFetcher) process(req *StateRequest) {
 
-	fmt.Println(time.Now().UnixMilli())
-
-	defer func() { req.Done <- struct{}{} }()
+	defer func() {
+		req.Done <- struct{}{}
+	}()
 
 	if req.Address != nil {
 		ctx := context.Background()

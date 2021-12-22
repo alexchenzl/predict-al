@@ -3,10 +3,11 @@ package fakestate
 import (
 	"context"
 	"errors"
+	"math/big"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/rpc"
-	"math/big"
 )
 
 // Client defines typed wrappers for the Ethereum RPC API.
