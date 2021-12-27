@@ -10,7 +10,7 @@ import (
 )
 
 type StateRequest struct {
-	blockNumber *big.Int
+	BlockNumber *big.Int
 	Address     *common.Address
 	Key         *common.Hash
 	Done        chan struct{}
@@ -51,7 +51,11 @@ func (sf *StateFetcher) Close() {
 	<-sf.term
 }
 
-func (sf *StateFetcher) Fetch(accounts []*common.Address, keys []*common.Hash) error {
+func (sf *StateFetcher) CopyStatedb() *FakeStateDB {
+	return sf.statedb.Copy()
+}
+
+func (sf *StateFetcher) Fetch(accounts []*common.Address, keys []*common.Hash, blockNum *big.Int) error {
 
 	if accounts == nil || keys == nil || len(accounts) != len(keys) {
 		return errors.New("invalid parameters")
@@ -62,6 +66,7 @@ func (sf *StateFetcher) Fetch(accounts []*common.Address, keys []*common.Hash) e
 	for i := 0; i < len(accounts); i++ {
 		requests[i].Address = accounts[i]
 		requests[i].Key = keys[i]
+		requests[i].BlockNumber = blockNum
 		requests[i].Done = make(chan struct{})
 		sf.req <- &requests[i]
 	}
@@ -91,7 +96,7 @@ func (sf *StateFetcher) process(req *StateRequest) {
 		defer client.Close()
 
 		if req.Key == nil {
-			account, err := client.GetAccountAt(ctx, req.Address, req.blockNumber)
+			account, err := client.GetAccountAt(ctx, req.Address, req.BlockNumber)
 			if err == nil {
 				sf.lock.Lock()
 				sf.statedb.SetBalance(account.Address, account.Balance)
@@ -102,7 +107,7 @@ func (sf *StateFetcher) process(req *StateRequest) {
 				req.err = err
 			}
 		} else {
-			storage, err := client.GetStorageAt(ctx, req.Address, req.Key, req.blockNumber)
+			storage, err := client.GetStorageAt(ctx, req.Address, req.Key, req.BlockNumber)
 			if err == nil {
 				sf.lock.Lock()
 				sf.statedb.SetState(storage.Address, storage.Key, common.BytesToHash(storage.Value))

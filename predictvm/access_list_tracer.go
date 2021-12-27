@@ -115,10 +115,12 @@ type AccessListTracer struct {
 // NewAccessListTracer creates a new tracer that can generate AccessLists.
 // An optional AccessList can be specified to occupy slots and addresses in
 // the resulting accesslist.
-func NewAccessListTracer(acl types.AccessList, from, to common.Address, precompiles []common.Address) *AccessListTracer {
-	excl := map[common.Address]struct{}{
-		from: {}, to: {},
+func NewAccessListTracer(acl types.AccessList, from, to *common.Address, precompiles []common.Address) *AccessListTracer {
+	excl := map[common.Address]struct{}{*from: {}}
+	if to != nil {
+		excl[*to] = struct{}{}
 	}
+
 	for _, addr := range precompiles {
 		excl[addr] = struct{}{}
 	}

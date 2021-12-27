@@ -19,6 +19,7 @@ package fakestate
 import (
 	"fmt"
 	"github.com/ethereum/go-ethereum/common"
+	"math/big"
 	"os"
 	"testing"
 )
@@ -48,7 +49,7 @@ func TestFetcher(t *testing.T) {
 	keys[1] = &hash1
 	keys[2] = &hash2
 
-	fetcher.Fetch(accounts, keys)
+	fetcher.Fetch(accounts, keys, big.NewInt(13_650_000))
 
 	stateObj := statedb.getStateObject(address)
 

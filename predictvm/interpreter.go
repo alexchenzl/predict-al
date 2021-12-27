@@ -192,7 +192,7 @@ func (in *EVMInterpreter) RunBranch(pc uint64) (ret []byte, err error) {
 		stack.data = make([]uint256.Int, 0, stackLen)
 	}
 	for i := 0; i < stackLen; i++ {
-		stack.push(&stack.data[i])
+		stack.push(&callContext.Stack.data[i])
 	}
 
 	// Clone the memory
