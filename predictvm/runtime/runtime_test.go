@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/asm"
 	"math/big"
 	vm "predict_acl/predictvm"
+	"predict_acl/predictvm/fakestate"
 	"strings"
 	"testing"
 )
@@ -110,7 +111,7 @@ func TestAccessList(t *testing.T) {
 		fmt.Printf("%v\n\nBytecode: \n```\n0x%x\n```\nOperations: \n```\n%v\n```\n\n",
 			comment, code, ops)
 
-		state := vm.NewStateDB()
+		state := fakestate.NewStateDB()
 		address := common.HexToAddress("0x0a0a0a0a0a0a0a")
 		state.SetCode(address, code)
 

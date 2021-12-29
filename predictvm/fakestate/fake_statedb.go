@@ -1,11 +1,12 @@
-package predictvm
+package fakestate
 
 import (
 	"fmt"
+	"math/big"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	"math/big"
 )
 
 var (
@@ -111,6 +112,13 @@ func (s *FakeStateDB) GetBalance(addr common.Address) *big.Int {
 		return stateObject.Balance()
 	}
 	return common.Big0
+}
+
+func (s *FakeStateDB) SetBalance(addr common.Address, balance *big.Int) {
+	stateObject := s.getStateObject(addr)
+	if stateObject != nil {
+		stateObject.SetBalance(balance)
+	}
 }
 
 func (s *FakeStateDB) GetNonce(addr common.Address) uint64 {

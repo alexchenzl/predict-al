@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"math/big"
@@ -19,6 +20,7 @@ import (
 	"gopkg.in/urfave/cli.v1"
 
 	vm "predict_acl/predictvm"
+	"predict_acl/predictvm/fakestate"
 	"predict_acl/predictvm/runtime"
 )
 
@@ -35,10 +37,25 @@ func NewApp(usage string) *cli.App {
 var (
 	app = NewApp("the evm command line interface")
 
-	DebugFlag = cli.BoolFlag{
-		Name:  "debug",
-		Usage: "output full trace logs",
+	MainnetFlag = cli.BoolFlag{
+		Name:  "mainnet",
+		Usage: "Execute against mainnet",
 	}
+	RpcFlag = cli.StringFlag{
+		Name:  "rpc",
+		Usage: "Remote Geth RPC url",
+	}
+
+	TxHashFlag = cli.StringFlag{
+		Name:  "tx",
+		Usage: "Transaction hash",
+	}
+
+	BlockNumFlag = cli.StringFlag{
+		Name:  "block",
+		Usage: "Block number",
+	}
+
 	CodeFlag = cli.StringFlag{
 		Name:  "code",
 		Usage: "EVM code",
@@ -46,11 +63,6 @@ var (
 	CodeFileFlag = cli.StringFlag{
 		Name:  "codefile",
 		Usage: "File containing EVM code. If '-' is specified, code is read from stdin ",
-	}
-	GasFlag = cli.Uint64Flag{
-		Name:  "gas",
-		Usage: "gas limit for the evm",
-		Value: 10000000000,
 	}
 	PriceFlag = utils.BigFlag{
 		Name:  "price",
@@ -78,10 +90,6 @@ var (
 		Name:  "create",
 		Usage: "indicates the action should be create rather than call",
 	}
-	GenesisFlag = cli.StringFlag{
-		Name:  "prestate",
-		Usage: "JSON file with prestate (genesis) config",
-	}
 	SenderFlag = cli.StringFlag{
 		Name:  "sender",
 		Usage: "The transaction origin",
@@ -89,22 +97,6 @@ var (
 	ReceiverFlag = cli.StringFlag{
 		Name:  "receiver",
 		Usage: "The transaction receiver (execution context)",
-	}
-	DisableMemoryFlag = cli.BoolTFlag{
-		Name:  "nomemory",
-		Usage: "disable memory output",
-	}
-	DisableStackFlag = cli.BoolFlag{
-		Name:  "nostack",
-		Usage: "disable stack output",
-	}
-	DisableStorageFlag = cli.BoolFlag{
-		Name:  "nostorage",
-		Usage: "disable storage output",
-	}
-	DisableReturnDataFlag = cli.BoolTFlag{
-		Name:  "noreturndata",
-		Usage: "enable return data output",
 	}
 
 	OriginCommandHelpTemplate = `{{.Name}}{{if .Subcommands}} command{{end}}{{if .Flags}} [command options]{{end}} {{.ArgsUsage}}
@@ -164,31 +156,20 @@ func runCmd(ctx *cli.Context) error {
 	glogger := log.NewGlogHandler(log.StreamHandler(os.Stderr, log.TerminalFormat(false)))
 	glogger.Verbosity(log.Lvl(ctx.GlobalInt(VerbosityFlag.Name)))
 	log.Root().SetHandler(glogger)
-	logconfig := &vm.LogConfig{
-		EnableMemory:     !ctx.GlobalBool(DisableMemoryFlag.Name),
-		DisableStack:     ctx.GlobalBool(DisableStackFlag.Name),
-		DisableStorage:   ctx.GlobalBool(DisableStorageFlag.Name),
-		EnableReturnData: !ctx.GlobalBool(DisableReturnDataFlag.Name),
-		Debug:            ctx.GlobalBool(DebugFlag.Name),
-	}
 
 	var (
 		tracer        vm.Tracer
-		debugLogger   *vm.StructLogger
-		statedb       *vm.FakeStateDB
+		statedb       *fakestate.FakeStateDB
 		sender        = common.BytesToAddress([]byte("sender"))
 		receiver      = common.BytesToAddress([]byte("receiver"))
 		genesisConfig *core.Genesis
 	)
 
-	debugLogger = vm.NewStructLogger(logconfig)
-	if ctx.GlobalBool(DebugFlag.Name) {
-		tracer = debugLogger
-	} else {
-		tracer = vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin)
+	if ctx.GlobalString(RpcFlag.Name) != "" {
+		return runCmdWithFetcher(ctx, ctx.GlobalString(RpcFlag.Name))
 	}
 
-	statedb = vm.NewStateDB()
+	statedb = fakestate.NewStateDB()
 	genesisConfig = new(core.Genesis)
 
 	if ctx.GlobalString(SenderFlag.Name) != "" {
@@ -200,7 +181,184 @@ func runCmd(ctx *cli.Context) error {
 		receiver = common.HexToAddress(ctx.GlobalString(ReceiverFlag.Name))
 	}
 
-	var code []byte
+	tracer = vm.NewAccessListTracer(nil, &sender, &receiver, vm.PrecompiledAddressesBerlin)
+	runtimeConfig := runtime.Config{
+		Origin:      sender,
+		State:       statedb,
+		GasLimit:    uint64(10000000000),
+		GasPrice:    utils.GlobalBig(ctx, PriceFlag.Name),
+		Value:       utils.GlobalBig(ctx, ValueFlag.Name),
+		Difficulty:  new(big.Int),
+		Time:        new(big.Int).SetInt64(time.Now().Unix()),
+		Coinbase:    genesisConfig.Coinbase,
+		BlockNumber: new(big.Int).SetUint64(genesisConfig.Number),
+		EVMConfig: vm.Config{
+			Tracer: tracer,
+			Debug:  true,
+		},
+	}
+
+	if ctx.GlobalBool(MainnetFlag.Name) {
+		runtimeConfig.ChainConfig = params.MainnetChainConfig
+	} else {
+		runtimeConfig.ChainConfig = params.AllEthashProtocolChanges
+	}
+
+	hexInput := []byte(ctx.GlobalString(InputFlag.Name))
+	input := common.FromHex(string(bytes.TrimSpace(hexInput)))
+	code := parseCode(ctx)
+
+	return runTx(ctx, &runtimeConfig, &receiver, code, input)
+}
+
+func createAddress(hex string) *common.Address {
+	address := new(common.Address)
+	address.SetBytes(common.FromHex(hex))
+	return address
+}
+
+func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
+	rpcCtx := context.Background()
+	rpcClient, err := fakestate.DialContext(rpcCtx, rpc)
+	if err != nil {
+		return err
+	}
+	defer rpcClient.Close()
+
+	var (
+		parentBlockNum *big.Int
+		blockNum       *big.Int
+		tx             *fakestate.RpcTransaction
+		pending        = true
+
+		sender   *common.Address
+		receiver *common.Address
+		value    *big.Int
+		input    []byte
+		code     []byte
+		price    *big.Int
+	)
+
+	txHash := ctx.GlobalString(TxHashFlag.Name)
+	if len(txHash) > 0 {
+		// if txHash is specified, retrieve tx parameters from remote Geth node,
+		// arguments such as sender, receiver, value, input and code will be ignored
+		tx, pending, err = rpcClient.GetTransactionByHash(rpcCtx, common.HexToHash(txHash))
+		if err != nil {
+			return err
+		}
+		if !pending {
+			// history tx
+			blockNum, _ = new(big.Int).SetString(*tx.BlockNumber, 0)
+			parentBlockNum = blockNum.Sub(blockNum, big.NewInt(1))
+		}
+
+		sender = tx.From
+		receiver = tx.Tx.To()
+		value = tx.Tx.Value()
+		input = tx.Tx.Data()
+		price = tx.Tx.GasPrice()
+	} else {
+		// parse tx parameters from arguments
+		if ctx.GlobalString(SenderFlag.Name) != "" {
+			sender = new(common.Address)
+			sender.SetBytes(common.FromHex(ctx.GlobalString(SenderFlag.Name)))
+		}
+		if ctx.GlobalString(ReceiverFlag.Name) != "" {
+			receiver = new(common.Address)
+			receiver.SetBytes(common.FromHex(ctx.GlobalString(ReceiverFlag.Name)))
+		}
+
+		hexInput := []byte(ctx.GlobalString(InputFlag.Name))
+		input = common.FromHex(string(bytes.TrimSpace(hexInput)))
+		value = utils.GlobalBig(ctx, ValueFlag.Name)
+
+		code = parseCode(ctx)
+		price = utils.GlobalBig(ctx, PriceFlag.Name)
+	}
+
+	// Get current block header to generate runtime config
+	// If tx is not specified, get the latest block header, else:
+	// for a pending tx, get the latest block header
+	// for a history tx, get the block header in which the tx is included
+	header, err := rpcClient.GetBlockHeader(rpcCtx, blockNum)
+	if err != nil {
+		return err
+	}
+
+	txTime := int64(header.Time)
+	txBlockNum := header.Number
+	if pending {
+		txTime = time.Now().Unix()
+		txBlockNum = big.NewInt(txBlockNum.Int64() + 1)
+
+		parentBlockNum = header.Number
+	}
+
+	stateDB := fakestate.NewStateDB()
+	fetcher := fakestate.NewStateFetcher(stateDB, rpc, 6)
+	defer fetcher.Close()
+
+	// Load sender and receiver states from remote Geth server
+	if sender != nil || receiver != nil {
+		var accounts = [2]*common.Address{sender, receiver}
+		var keys [2]*common.Hash
+		start, end := 0, 2
+		if sender == nil {
+			start++
+		}
+		if receiver == nil {
+			end--
+		}
+		if end > start {
+			fetcher.Fetch(accounts[start:end], keys[start:end], parentBlockNum)
+		}
+	}
+
+	if sender == nil {
+		sender = createAddress("sender")
+		stateDB.CreateAccount(*sender)
+	}
+	// receiver should be nil if tx is a contract creation tx
+	if tx == nil && receiver == nil {
+		receiver = createAddress("receiver")
+	}
+
+	if code == nil && receiver != nil {
+		code = stateDB.GetCode(*receiver)
+	}
+
+	// Load recent 256 block hashes
+	hashmap, err := rpcClient.GetRecentBlockHashes(rpcCtx, parentBlockNum, 256)
+	bhCache := fakestate.NewBlockHashCache(hashmap)
+
+	// Set runtime config
+	runtimeConfig := runtime.Config{
+		ChainConfig: params.MainnetChainConfig,
+		Origin:      *sender,
+		GasLimit:    header.GasLimit,
+		GasPrice:    price,
+		Value:       value,
+		Difficulty:  header.Difficulty,
+		Time:        big.NewInt(txTime),
+		Coinbase:    header.Coinbase,
+		BlockNumber: txBlockNum,
+
+		EVMConfig: vm.Config{
+			Tracer: vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin),
+			Debug:  true,
+		},
+		BaseFee: header.BaseFee,
+
+		State:     stateDB.Copy(),
+		GetHashFn: bhCache.GetHashFn,
+		Fetcher:   fetcher,
+	}
+	return runTx(ctx, &runtimeConfig, receiver, code, input)
+}
+
+func parseCode(ctx *cli.Context) []byte {
+
 	codeFileFlag := ctx.GlobalString(CodeFileFlag.Name)
 	codeFlag := ctx.GlobalString(CodeFlag.Name)
 
@@ -231,68 +389,37 @@ func runCmd(ctx *cli.Context) error {
 			fmt.Printf("Invalid input length for hex data (%d)\n", len(hexcode))
 			os.Exit(1)
 		}
-		code = common.FromHex(string(hexcode))
+		return common.FromHex(string(hexcode))
 	}
+	return nil
+}
 
-	initialGas := ctx.GlobalUint64(GasFlag.Name)
-	runtimeConfig := runtime.Config{
-		Origin:      sender,
-		State:       statedb,
-		GasLimit:    initialGas,
-		GasPrice:    utils.GlobalBig(ctx, PriceFlag.Name),
-		Value:       utils.GlobalBig(ctx, ValueFlag.Name),
-		Difficulty:  genesisConfig.Difficulty,
-		Time:        new(big.Int).SetUint64(genesisConfig.Timestamp),
-		Coinbase:    genesisConfig.Coinbase,
-		BlockNumber: new(big.Int).SetUint64(genesisConfig.Number),
-		EVMConfig: vm.Config{
-			Tracer: tracer,
-			Debug:  true,
-		},
-	}
-
-	runtimeConfig.ChainConfig = params.AllEthashProtocolChanges
-
-	hexInput := []byte(ctx.GlobalString(InputFlag.Name))
-	input := common.FromHex(string(bytes.TrimSpace(hexInput)))
-
+func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, receiver *common.Address, code []byte, input []byte) error {
 	var execFunc func() ([]byte, uint64, error)
-	if ctx.GlobalBool(CreateFlag.Name) {
+	if receiver == nil || ctx.GlobalBool(CreateFlag.Name) {
 		input = append(code, input...)
 		execFunc = func() ([]byte, uint64, error) {
-			output, _, gasLeft, err := runtime.Create(input, &runtimeConfig)
+			output, _, gasLeft, err := runtime.Create(input, runtimeConfig)
 			return output, gasLeft, err
 		}
 	} else {
 		if len(code) > 0 {
-			statedb.SetCode(receiver, code)
+			runtimeConfig.State.SetCode(*receiver, code)
 		}
 		execFunc = func() ([]byte, uint64, error) {
-			return runtime.Call(receiver, input, &runtimeConfig)
+			return runtime.Call(*receiver, input, runtimeConfig)
 		}
 	}
 
 	bench := ctx.GlobalBool(BenchFlag.Name)
-	output, leftOverGas, stats, err := timedExec(bench, execFunc)
-
-	if ctx.GlobalBool(DebugFlag.Name) {
-		if debugLogger != nil {
-			fmt.Fprintln(os.Stderr, "#### TRACE ####")
-			vm.WriteTrace(os.Stderr, debugLogger.StructLogs())
-		}
-		//fmt.Fprintln(os.Stderr, "#### LOGS ####")
-		//vm.WriteLogs(os.Stderr, statedb.Logs())
-	}
+	output, _, stats, err := timedExec(bench, execFunc)
 
 	if bench {
-		fmt.Fprintf(os.Stderr, `EVM gas used:    %d
-execution time:  %v
-allocations:     %d
-allocated bytes: %d
-`, initialGas-leftOverGas, stats.time, stats.allocs, stats.bytesAllocated)
+		fmt.Fprintf(os.Stderr, "execution time: %v\n allocations: %d\n allocated bytes: %d",
+			stats.time, stats.allocs, stats.bytesAllocated)
 	}
 
-	if alTracer, ok := tracer.(*vm.AccessListTracer); ok {
+	if alTracer, ok := runtimeConfig.EVMConfig.Tracer.(*vm.AccessListTracer); ok {
 		fmt.Printf("0x%x\n", output)
 		if err != nil {
 			fmt.Printf(" error: %v\n", err)
@@ -307,29 +434,24 @@ allocated bytes: %d
 		}
 
 	}
-
 	return nil
 }
 
 func init() {
 	app.Flags = []cli.Flag{
+		RpcFlag,
+		BlockNumFlag,
+		TxHashFlag,
 		BenchFlag,
 		CreateFlag,
-		DebugFlag,
 		VerbosityFlag,
 		CodeFlag,
 		CodeFileFlag,
-		GasFlag,
 		PriceFlag,
 		ValueFlag,
 		InputFlag,
-		GenesisFlag,
 		SenderFlag,
 		ReceiverFlag,
-		DisableMemoryFlag,
-		DisableStackFlag,
-		DisableStorageFlag,
-		DisableReturnDataFlag,
 	}
 
 	app.Commands = []cli.Command{

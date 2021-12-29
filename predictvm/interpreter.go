@@ -22,6 +22,8 @@ import (
 	"github.com/holiman/uint256"
 	"hash"
 	"sync/atomic"
+
+	"predict_acl/predictvm/fakestate"
 )
 
 // RunBranchDepth Maximum depth of RunBranch stack. If the depth is n, there will be 2^n branches
@@ -190,7 +192,7 @@ func (in *EVMInterpreter) RunBranch(pc uint64) (ret []byte, err error) {
 		stack.data = make([]uint256.Int, 0, stackLen)
 	}
 	for i := 0; i < stackLen; i++ {
-		stack.push(&stack.data[i])
+		stack.push(&callContext.Stack.data[i])
 	}
 
 	// Clone the memory
@@ -199,7 +201,7 @@ func (in *EVMInterpreter) RunBranch(pc uint64) (ret []byte, err error) {
 
 	// snapshot is not implemented yet, so clone the statedb instead
 	statedb := in.evm.StateDB
-	in.evm.StateDB = in.evm.StateDB.(*FakeStateDB).Copy()
+	in.evm.StateDB = in.evm.StateDB.(*fakestate.FakeStateDB).Copy()
 
 	in.callContext = newCallContext
 

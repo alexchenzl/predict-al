@@ -19,6 +19,7 @@ package runtime
 import (
 	"math"
 	"math/big"
+	"predict_acl/predictvm/fakestate"
 	"time"
 
 	vm "predict_acl/predictvm"
@@ -44,8 +45,10 @@ type Config struct {
 	EVMConfig   vm.Config
 	BaseFee     *big.Int
 
-	State     *vm.FakeStateDB
+	State     *fakestate.FakeStateDB
 	GetHashFn func(n uint64) common.Hash
+
+	Fetcher *fakestate.StateFetcher
 }
 
 // sets defaults on the config
@@ -103,14 +106,14 @@ func setDefaults(cfg *Config) {
 //
 // Execute sets up an in-memory, temporary, environment for the execution of
 // the given code. It makes sure that it's restored to its original state afterwards.
-func Execute(code, input []byte, cfg *Config) ([]byte, *vm.FakeStateDB, error) {
+func Execute(code, input []byte, cfg *Config) ([]byte, *fakestate.FakeStateDB, error) {
 	if cfg == nil {
 		cfg = new(Config)
 	}
 	setDefaults(cfg)
 
 	if cfg.State == nil {
-		cfg.State = vm.NewStateDB()
+		cfg.State = fakestate.NewStateDB()
 	}
 	var (
 		address = common.BytesToAddress([]byte("contract"))
@@ -142,7 +145,7 @@ func Create(input []byte, cfg *Config) ([]byte, common.Address, uint64, error) {
 
 	if cfg.State == nil {
 		//cfg.State, _ = state.New(common.Hash{}, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
-		cfg.State = vm.NewStateDB()
+		cfg.State = fakestate.NewStateDB()
 	}
 	var (
 		vmenv  = NewEnv(cfg)
@@ -165,16 +168,14 @@ func Create(input []byte, cfg *Config) ([]byte, common.Address, uint64, error) {
 // Call, unlike Execute, requires a config and also requires the State field to
 // be set.
 func Call(address common.Address, input []byte, cfg *Config) ([]byte, uint64, error) {
+	if cfg == nil {
+		cfg = new(Config)
+	}
 	setDefaults(cfg)
 
 	vmenv := NewEnv(cfg)
 
 	sender := cfg.State.GetOrNewStateObject(cfg.Origin)
-	//statedb := cfg.State
-
-	//if rules := cfg.ChainConfig.Rules(vmenv.Context.BlockNumber); rules.IsBerlin {
-	//	statedb.PrepareAccessList(cfg.Origin, &address, vm.ActivePrecompiles(rules), nil)
-	//}
 	// Call the code with the given configuration.
 	ret, leftOverGas, err := vmenv.Call(
 		sender,
