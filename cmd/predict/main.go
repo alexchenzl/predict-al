@@ -37,10 +37,6 @@ func NewApp(usage string) *cli.App {
 var (
 	app = NewApp("the evm command line interface")
 
-	MainnetFlag = cli.BoolFlag{
-		Name:  "mainnet",
-		Usage: "Execute against mainnet",
-	}
 	RpcFlag = cli.StringFlag{
 		Name:  "rpc",
 		Usage: "Remote Geth RPC url",
@@ -198,11 +194,7 @@ func runCmd(ctx *cli.Context) error {
 		},
 	}
 
-	if ctx.GlobalBool(MainnetFlag.Name) {
-		runtimeConfig.ChainConfig = params.MainnetChainConfig
-	} else {
-		runtimeConfig.ChainConfig = params.AllEthashProtocolChanges
-	}
+	runtimeConfig.ChainConfig = params.AllEthashProtocolChanges
 
 	hexInput := []byte(ctx.GlobalString(InputFlag.Name))
 	input := common.FromHex(string(bytes.TrimSpace(hexInput)))
@@ -215,6 +207,21 @@ func createAddress(hex string) *common.Address {
 	address := new(common.Address)
 	address.SetBytes(common.FromHex(hex))
 	return address
+}
+
+func getChainConfig(chainID uint64) *params.ChainConfig {
+	switch chainID {
+	case 1:
+		return params.MainnetChainConfig
+	case 3:
+		return params.RopstenChainConfig
+	case 4:
+		return params.RinkebyChainConfig
+	case 5:
+		return params.GoerliChainConfig
+	default:
+		return params.AllEthashProtocolChanges
+	}
 }
 
 func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
@@ -277,6 +284,13 @@ func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
 		price = utils.GlobalBig(ctx, PriceFlag.Name)
 	}
 
+	// Get chain id
+	chainId, err := rpcClient.ChainID(rpcCtx)
+	if err != nil {
+		return err
+	}
+	chainConfig := getChainConfig(chainId.Uint64())
+
 	// Get current block header to generate runtime config
 	// If tx is not specified, get the latest block header, else:
 	// for a pending tx, get the latest block header
@@ -334,7 +348,7 @@ func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
 
 	// Set runtime config
 	runtimeConfig := runtime.Config{
-		ChainConfig: params.MainnetChainConfig,
+		ChainConfig: chainConfig,
 		Origin:      *sender,
 		GasLimit:    header.GasLimit,
 		GasPrice:    price,
