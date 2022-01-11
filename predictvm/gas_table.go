@@ -64,7 +64,7 @@ func gasSha3(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize
 // static cost have a dynamic cost which is solely based on the memory
 // expansion
 func pureMemoryGascost(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
-	return memoryGasCost(mem, memorySize)
+	return 0, nil
 }
 
 var (

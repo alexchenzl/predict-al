@@ -100,11 +100,30 @@ var (
 		Usage: "max number of concurrent requests in the state fetcher",
 		Value: 0,
 	}
-
 	MaxRoundsFlag = cli.IntFlag{
 		Name:  "mr",
 		Usage: "max rounds to predict access list",
 		Value: 0,
+	}
+	DebugFlag = cli.BoolFlag{
+		Name:  "debug",
+		Usage: "output full trace logs",
+	}
+	DisableMemoryFlag = cli.BoolTFlag{
+		Name:  "nomemory",
+		Usage: "disable memory output",
+	}
+	DisableStackFlag = cli.BoolFlag{
+		Name:  "nostack",
+		Usage: "disable stack output",
+	}
+	DisableStorageFlag = cli.BoolFlag{
+		Name:  "nostorage",
+		Usage: "disable storage output",
+	}
+	DisableReturnDataFlag = cli.BoolTFlag{
+		Name:  "noreturndata",
+		Usage: "enable return data output",
 	}
 
 	OriginCommandHelpTemplate = `{{.Name}}{{if .Subcommands}} command{{end}}{{if .Flags}} [command options]{{end}} {{.ArgsUsage}}
@@ -166,7 +185,6 @@ func runCmd(ctx *cli.Context) error {
 	log.Root().SetHandler(glogger)
 
 	var (
-		tracer        vm.Tracer
 		statedb       *fakestate.FakeStateDB
 		sender        = common.BytesToAddress([]byte("sender"))
 		receiver      = common.BytesToAddress([]byte("receiver"))
@@ -189,7 +207,6 @@ func runCmd(ctx *cli.Context) error {
 		receiver = common.HexToAddress(ctx.GlobalString(ReceiverFlag.Name))
 	}
 
-	tracer = vm.NewAccessListTracer(nil, &sender, &receiver, vm.PrecompiledAddressesBerlin)
 	runtimeConfig := runtime.Config{
 		Origin:      sender,
 		State:       statedb,
@@ -200,10 +217,6 @@ func runCmd(ctx *cli.Context) error {
 		Time:        new(big.Int).SetInt64(time.Now().Unix()),
 		Coinbase:    genesisConfig.Coinbase,
 		BlockNumber: new(big.Int).SetUint64(genesisConfig.Number),
-		EVMConfig: vm.Config{
-			Tracer: tracer,
-			Debug:  true,
-		},
 	}
 
 	runtimeConfig.ChainConfig = params.AllEthashProtocolChanges
@@ -425,11 +438,23 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Addre
 	totalSlotNum := 0
 	batches := make([]int, 0, 1)
 
-	tracer := vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin)
+	logconfig := &vm.LogConfig{
+		EnableMemory:     !ctx.GlobalBool(DisableMemoryFlag.Name),
+		DisableStack:     ctx.GlobalBool(DisableStackFlag.Name),
+		DisableStorage:   ctx.GlobalBool(DisableStorageFlag.Name),
+		EnableReturnData: !ctx.GlobalBool(DisableReturnDataFlag.Name),
+		Debug:            ctx.GlobalBool(DebugFlag.Name),
+	}
+	tracer := vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin, logconfig)
 	runtimeConfig.EVMConfig = vm.Config{
 		Tracer: tracer,
 		Debug:  true,
 	}
+
+	fmt.Printf("\n\nInitial state access\n")
+	fmt.Printf("Sender: %v\n", sender)
+	fmt.Printf("Receiver: %v\n", receiver)
+
 	for {
 		fmt.Printf("\n\nROUND %d\n", round)
 
@@ -540,6 +565,13 @@ func init() {
 		InputFlag,
 		SenderFlag,
 		ReceiverFlag,
+		MaxProcsFlag,
+		MaxRoundsFlag,
+		DebugFlag,
+		DisableMemoryFlag,
+		DisableStackFlag,
+		DisableStorageFlag,
+		DisableReturnDataFlag,
 	}
 
 	app.Commands = []cli.Command{

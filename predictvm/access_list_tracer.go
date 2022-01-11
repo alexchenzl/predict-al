@@ -18,6 +18,7 @@ package predictvm
 
 import (
 	"math/big"
+	"os"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -125,11 +126,12 @@ type AccessListTracer struct {
 	list      accessList                  // Set of accounts and storage slots touched
 	knownList accessList                  // Already known accounts and storage slots in last rounds
 	HasMore   bool
+	logger    *StructLogger
 }
 
 // NewAccessListTracer creates a new tracer that can generate AccessLists.
 // An optional AccessList can be set as already known AccessList
-func NewAccessListTracer(acl types.AccessList, from, to *common.Address, precompiles []common.Address) *AccessListTracer {
+func NewAccessListTracer(acl types.AccessList, from, to *common.Address, precompiles []common.Address, cfg *LogConfig) *AccessListTracer {
 	excl := map[common.Address]struct{}{*from: {}}
 	if to != nil {
 		excl[*to] = struct{}{}
@@ -148,11 +150,18 @@ func NewAccessListTracer(acl types.AccessList, from, to *common.Address, precomp
 			knownList.addSlot(al.Address, slot)
 		}
 	}
+
+	var logger *StructLogger
+	if cfg != nil && cfg.Debug {
+		logger = NewStructLogger(cfg)
+	}
+
 	return &AccessListTracer{
 		excl:      excl,
 		list:      list,
 		knownList: knownList,
 		HasMore:   false,
+		logger:    logger,
 	}
 }
 
@@ -203,6 +212,13 @@ func (a *AccessListTracer) CaptureStart(env *EVM, from common.Address, to common
 
 // CaptureState captures all opcodes that touch storage or addresses and adds them to the accesslist.
 func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, rData []byte, depth int, err error) {
+	if a.logger != nil {
+		a.logger.CaptureState(env, pc, op, gas, cost, scope, rData, depth, err)
+
+		WriteTrace(os.Stdout, a.logger.logs[len(a.logger.logs)-1:])
+
+	}
+
 	stack := scope.Stack
 	// For predicting purpose, it's not necessary to record SSTORE
 	if op == SLOAD && stack.len() >= 1 {
@@ -251,7 +267,11 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 func (*AccessListTracer) CaptureFault(env *EVM, pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, depth int, err error) {
 }
 
-func (*AccessListTracer) CaptureEnd(output []byte, gasUsed uint64, t time.Duration, err error) {}
+func (a *AccessListTracer) CaptureEnd(output []byte, gasUsed uint64, t time.Duration, err error) {
+	if a.logger != nil {
+		a.logger.CaptureEnd(output, gasUsed, t, err)
+	}
+}
 
 func (*AccessListTracer) CaptureEnter(typ OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
 }

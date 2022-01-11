@@ -62,6 +62,7 @@ type LogConfig struct {
 // StructLog is emitted to the EVM each cycle and lists information about the current internal state
 // prior to the execution of the statement.
 type StructLog struct {
+	Contract      common.Address              `json:"Contract"`
 	Pc            uint64                      `json:"pc"`
 	Op            OpCode                      `json:"op"`
 	Gas           uint64                      `json:"gas"`
@@ -73,6 +74,8 @@ type StructLog struct {
 	Storage       map[common.Hash]common.Hash `json:"-"`
 	Depth         int                         `json:"depth"`
 	RefundCounter uint64                      `json:"refund"`
+	BranchDepth   int                         `json:"depth"`
+	Info          string                      `json:"info"`
 	Err           error                       `json:"-"`
 }
 
@@ -206,8 +209,17 @@ func (l *StructLogger) CaptureState(env *EVM, pc uint64, op OpCode, gas, cost ui
 		rdata = make([]byte, len(rData))
 		copy(rdata, rData)
 	}
+
+	info := ""
+	if op == JUMPI {
+		cond := stack.data[stack.len()-2]
+		if cond.Eq(UnknownValuePlaceHolder) {
+			info = "Unknown Condition"
+		}
+	}
+
 	// create a new snapshot of the EVM.
-	log := StructLog{pc, op, gas, cost, mem, memory.Len(), stck, rdata, storage, depth, env.StateDB.GetRefund(), err}
+	log := StructLog{contract.Address(), pc, op, gas, cost, mem, memory.Len(), stck, rdata, storage, depth, env.StateDB.GetRefund(), env.branchDepth, info, err}
 	l.logs = append(l.logs, log)
 }
 
@@ -245,7 +257,11 @@ func (l *StructLogger) Output() []byte { return l.output }
 // WriteTrace writes a formatted trace to the given writer
 func WriteTrace(writer io.Writer, logs []StructLog) {
 	for _, log := range logs {
-		fmt.Fprintf(writer, "%-16spc=%08d gas=%v cost=%v", log.Op, log.Pc, log.Gas, log.GasCost)
+		fmt.Fprintf(writer, "contract=%s %-16spc=%08x depth=%v branch-depth=%v", log.Contract, log.Op, log.Pc, log.Depth, log.BranchDepth)
+		if len(log.Info) > 0 {
+			fmt.Fprintf(writer, " info=%s", log.Info)
+		}
+
 		if log.Err != nil {
 			fmt.Fprintf(writer, " ERROR: %v", log.Err)
 		}

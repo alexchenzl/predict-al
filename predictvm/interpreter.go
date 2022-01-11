@@ -278,10 +278,10 @@ func (in *EVMInterpreter) runOpCodes(pc uint64) (ret []byte, err error) {
 			}
 		}
 		// Static portion of gas
-		cost = operation.constantGas // For tracing
-		if !callContext.Contract.UseGas(operation.constantGas) {
-			return nil, ErrOutOfGas
-		}
+		//cost = operation.constantGas // For tracing
+		//if !callContext.Contract.UseGas(operation.constantGas) {
+		//	return nil, ErrOutOfGas
+		//}
 
 		var memorySize uint64
 		// calculate the new memory size and expand the memory to fit
@@ -302,14 +302,14 @@ func (in *EVMInterpreter) runOpCodes(pc uint64) (ret []byte, err error) {
 		// Dynamic portion of gas
 		// consume the gas and return an error if not enough gas is available.
 		// cost is explicitly set so that the capture state defer method can get the proper cost
-		if operation.dynamicGas != nil {
-			var dynamicCost uint64
-			dynamicCost, err = operation.dynamicGas(in.evm, callContext.Contract, callContext.Stack, callContext.Memory, memorySize)
-			cost += dynamicCost // total cost, for debug tracing
-			if err != nil || !callContext.Contract.UseGas(dynamicCost) {
-				return nil, ErrOutOfGas
-			}
-		}
+		//if operation.dynamicGas != nil {
+		//	var dynamicCost uint64
+		//	dynamicCost, err = operation.dynamicGas(in.evm, callContext.Contract, callContext.Stack, callContext.Memory, memorySize)
+		//	cost += dynamicCost // total cost, for debug tracing
+		//	if err != nil || !callContext.Contract.UseGas(dynamicCost) {
+		//		return nil, ErrOutOfGas
+		//	}
+		//}
 		if memorySize > 0 {
 			callContext.Memory.Resize(memorySize)
 		}
