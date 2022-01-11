@@ -494,7 +494,7 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Addre
 
 		printNewStateAccess(newAccounts, newSlots)
 		round++
-		if !tracer.HasMore || mr > 0 && round >= round || tracer.HasMore && batch == 0 {
+		if !tracer.HasMore || mr > 0 && round >= mr || tracer.HasMore && batch == 0 {
 			break
 		}
 
