@@ -214,9 +214,7 @@ func (a *AccessListTracer) CaptureStart(env *EVM, from common.Address, to common
 func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, rData []byte, depth int, err error) {
 	if a.logger != nil {
 		a.logger.CaptureState(env, pc, op, gas, cost, scope, rData, depth, err)
-
-		WriteTrace(os.Stdout, a.logger.logs[len(a.logger.logs)-1:])
-
+		a.logger.WriteLastTrace(os.Stdout, "")
 	}
 
 	stack := scope.Stack
@@ -264,7 +262,11 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 	}
 }
 
-func (*AccessListTracer) CaptureFault(env *EVM, pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, depth int, err error) {
+func (a *AccessListTracer) CaptureFault(env *EVM, pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, depth int, err error) {
+	if a.logger != nil {
+		a.logger.CaptureFault(env, pc, op, gas, cost, scope, depth, err)
+		a.logger.WriteLastTrace(os.Stdout, "Fault Captured: ")
+	}
 }
 
 func (a *AccessListTracer) CaptureEnd(output []byte, gasUsed uint64, t time.Duration, err error) {

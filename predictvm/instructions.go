@@ -330,9 +330,7 @@ func opSAR(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte
 	return nil, nil
 }
 
-// TODO
-// Offset and size must not be unknown, need some mechanism to make sure this.
-// But data may be unknown
+// Offset and size must not be unknown, but data may be unknown
 func opSha3(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	offset, size := scope.Stack.pop(), scope.Stack.peek()
 	data := scope.Memory.GetPtr(int64(offset.Uint64()), int64(size.Uint64()))
@@ -509,7 +507,6 @@ func opCodeCopy(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([
 // Now assume memOffset and codeOffset should be known when address is known. There's not any opcode to get codeOffset,
 // so this value must be known during compiling stage.
 //
-// TODO NOT SURE about the above.
 func opExtCodeCopy(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	var (
 		stack      = scope.Stack
@@ -545,7 +542,6 @@ func opExtCodeCopy(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext)
 
 }
 
-// TODO
 // Purpose of this opcode: https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1052.md
 //
 // opExtCodeHash returns the code hash of a specified account.
@@ -656,7 +652,7 @@ func opPop(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte
 	return nil, nil
 }
 
-// TODO - Assume memory offset is always known
+// Assume memory offset is always known
 func opMload(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	v := scope.Stack.peek()
 	if v.Eq(UnknownValuePlaceHolder) {
@@ -668,7 +664,7 @@ func opMload(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]by
 	return nil, nil
 }
 
-// TODO - Assume memory offset is known now
+// Assume memory offset is always known now
 // Now suppose that mStart is known, it's ok if val is fake value
 func opMstore(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	// pop value of the stack
@@ -680,7 +676,7 @@ func opMstore(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]b
 	return nil, nil
 }
 
-// TODO - If either parameter is unknown, need to return error.
+// If any parameter is unknown, returns error.
 // What's the typical use case of mstore8 ? It's seldom seen in disassembly code.
 // The UnknownValuePlaceHolder is 32 bytes, may have issue with byte memory operation.
 func opMstore8(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
@@ -699,7 +695,6 @@ func opMstore8(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]
 		//scope.Memory.Set32(off.Uint64(), &val)
 		return nil, ErrMstore8Value
 	}
-
 }
 
 // If loc is unknown, keep the stack value as unknown
@@ -740,13 +735,22 @@ func opJump(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byt
 	return nil, nil
 }
 
-// TODO - need a backtracking or interruption mechanism
 // pos should be a constant, but cond may be fake value
 func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	pos, cond := scope.Stack.pop(), scope.Stack.pop()
 
 	if !scope.Contract.validJumpdest(&pos) {
 		return nil, ErrInvalidJump
+	}
+
+	jump := scope.Jumpis[*pc]
+	jump++
+	scope.Jumpis[*pc] = jump
+
+	// Avoid too many loops
+	// FIXME this is a magic number, could be configurable
+	if jump > 1024 {
+		return nil, ErrJumpiTooManyLoops
 	}
 
 	if !cond.Eq(UnknownValuePlaceHolder) {
@@ -756,6 +760,11 @@ func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]by
 			*pc++
 		}
 	} else {
+		// Avoid infinite loop
+		if jump > 1 {
+			return nil, ErrJumpiInfiniteLoop
+		}
+
 		// If cond is not known, need to follow both branches
 		// But if branch depth is too big, only follow non-zero branch
 		if interpreter.evm.branchDepth < RunBranchDepth {
@@ -868,7 +877,6 @@ func opCreate2(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]
 	return nil, nil
 }
 
-// TODO
 // toAddr is possible to be unknown if the target contract address is stored in a storage slot.
 // value is also possible to be unknown.
 // inOffset, inSize, retOffset and retSize should not be unknown because they are known in compiling time.
@@ -1076,7 +1084,6 @@ func opReturn(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]b
 	return ret, nil
 }
 
-// TODO - needs to verify
 // The offset and size should be known in previous steps
 func opRevert(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	offset, size := scope.Stack.pop(), scope.Stack.pop()

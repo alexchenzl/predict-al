@@ -107,17 +107,17 @@ var (
 	}
 	DebugFlag = cli.BoolFlag{
 		Name:  "debug",
-		Usage: "output full trace logs",
+		Usage: "output full evm execution trace logs",
 	}
 	DisableMemoryFlag = cli.BoolTFlag{
 		Name:  "nomemory",
 		Usage: "disable memory output",
 	}
-	DisableStackFlag = cli.BoolFlag{
+	DisableStackFlag = cli.BoolTFlag{
 		Name:  "nostack",
 		Usage: "disable stack output",
 	}
-	DisableStorageFlag = cli.BoolFlag{
+	DisableStorageFlag = cli.BoolTFlag{
 		Name:  "nostorage",
 		Usage: "disable storage output",
 	}
@@ -439,10 +439,10 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Addre
 	batches := make([]int, 0, 1)
 
 	logconfig := &vm.LogConfig{
-		EnableMemory:     !ctx.GlobalBool(DisableMemoryFlag.Name),
-		DisableStack:     ctx.GlobalBool(DisableStackFlag.Name),
-		DisableStorage:   ctx.GlobalBool(DisableStorageFlag.Name),
-		EnableReturnData: !ctx.GlobalBool(DisableReturnDataFlag.Name),
+		EnableMemory:     !ctx.GlobalBoolT(DisableMemoryFlag.Name),
+		DisableStack:     ctx.GlobalBoolT(DisableStackFlag.Name),
+		DisableStorage:   ctx.GlobalBoolT(DisableStorageFlag.Name),
+		EnableReturnData: !ctx.GlobalBoolT(DisableReturnDataFlag.Name),
 		Debug:            ctx.GlobalBool(DebugFlag.Name),
 	}
 	tracer := vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin, logconfig)
