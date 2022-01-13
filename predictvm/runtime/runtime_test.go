@@ -117,7 +117,7 @@ func TestAccessList(t *testing.T) {
 
 		sender := common.HexToAddress("0x1122")
 
-		tracer := vm.NewAccessListTracer(nil, sender, address, nil)
+		tracer := vm.NewAccessListTracer(nil, &sender, &address, nil)
 
 		config := &Config{
 			EVMConfig: vm.Config{

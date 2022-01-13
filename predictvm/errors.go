@@ -37,6 +37,8 @@ var (
 	ErrInvalidCode              = errors.New("invalid code: must not begin with 0xef")
 	ErrUnknownMemPos            = errors.New("memory offset or size should be known")
 	ErrMstore8Value             = errors.New("can not handle unknown mstore8 value")
+	ErrJumpiTooManyLoops        = errors.New("jumpi too many loops")
+	ErrJumpiInfiniteLoop        = errors.New("jumpi infinite loop")
 )
 
 // ErrStackUnderflow wraps an evm error when the items on the stack less

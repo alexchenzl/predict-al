@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"gopkg.in/urfave/cli.v1"
 	"io/ioutil"
 	"math/big"
 	"os"
@@ -15,9 +16,9 @@ import (
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
-	"gopkg.in/urfave/cli.v1"
 
 	vm "predict_acl/predictvm"
 	"predict_acl/predictvm/fakestate"
@@ -37,10 +38,6 @@ func NewApp(usage string) *cli.App {
 var (
 	app = NewApp("the evm command line interface")
 
-	MainnetFlag = cli.BoolFlag{
-		Name:  "mainnet",
-		Usage: "Execute against mainnet",
-	}
 	RpcFlag = cli.StringFlag{
 		Name:  "rpc",
 		Usage: "Remote Geth RPC url",
@@ -97,6 +94,36 @@ var (
 	ReceiverFlag = cli.StringFlag{
 		Name:  "receiver",
 		Usage: "The transaction receiver (execution context)",
+	}
+	MaxProcsFlag = cli.IntFlag{
+		Name:  "mp",
+		Usage: "max number of concurrent requests in the state fetcher",
+		Value: 0,
+	}
+	MaxRoundsFlag = cli.IntFlag{
+		Name:  "mr",
+		Usage: "max rounds to predict access list",
+		Value: 0,
+	}
+	DebugFlag = cli.BoolFlag{
+		Name:  "debug",
+		Usage: "output full evm execution trace logs",
+	}
+	DisableMemoryFlag = cli.BoolTFlag{
+		Name:  "nomemory",
+		Usage: "disable memory output",
+	}
+	DisableStackFlag = cli.BoolTFlag{
+		Name:  "nostack",
+		Usage: "disable stack output",
+	}
+	DisableStorageFlag = cli.BoolTFlag{
+		Name:  "nostorage",
+		Usage: "disable storage output",
+	}
+	DisableReturnDataFlag = cli.BoolTFlag{
+		Name:  "noreturndata",
+		Usage: "enable return data output",
 	}
 
 	OriginCommandHelpTemplate = `{{.Name}}{{if .Subcommands}} command{{end}}{{if .Flags}} [command options]{{end}} {{.ArgsUsage}}
@@ -158,7 +185,6 @@ func runCmd(ctx *cli.Context) error {
 	log.Root().SetHandler(glogger)
 
 	var (
-		tracer        vm.Tracer
 		statedb       *fakestate.FakeStateDB
 		sender        = common.BytesToAddress([]byte("sender"))
 		receiver      = common.BytesToAddress([]byte("receiver"))
@@ -181,7 +207,6 @@ func runCmd(ctx *cli.Context) error {
 		receiver = common.HexToAddress(ctx.GlobalString(ReceiverFlag.Name))
 	}
 
-	tracer = vm.NewAccessListTracer(nil, &sender, &receiver, vm.PrecompiledAddressesBerlin)
 	runtimeConfig := runtime.Config{
 		Origin:      sender,
 		State:       statedb,
@@ -192,29 +217,36 @@ func runCmd(ctx *cli.Context) error {
 		Time:        new(big.Int).SetInt64(time.Now().Unix()),
 		Coinbase:    genesisConfig.Coinbase,
 		BlockNumber: new(big.Int).SetUint64(genesisConfig.Number),
-		EVMConfig: vm.Config{
-			Tracer: tracer,
-			Debug:  true,
-		},
 	}
 
-	if ctx.GlobalBool(MainnetFlag.Name) {
-		runtimeConfig.ChainConfig = params.MainnetChainConfig
-	} else {
-		runtimeConfig.ChainConfig = params.AllEthashProtocolChanges
-	}
+	runtimeConfig.ChainConfig = params.AllEthashProtocolChanges
 
 	hexInput := []byte(ctx.GlobalString(InputFlag.Name))
 	input := common.FromHex(string(bytes.TrimSpace(hexInput)))
 	code := parseCode(ctx)
 
-	return runTx(ctx, &runtimeConfig, &receiver, code, input)
+	return runTx(ctx, &runtimeConfig, &sender, &receiver, code, input)
 }
 
 func createAddress(hex string) *common.Address {
 	address := new(common.Address)
 	address.SetBytes(common.FromHex(hex))
 	return address
+}
+
+func getChainConfig(chainID uint64) *params.ChainConfig {
+	switch chainID {
+	case 1:
+		return params.MainnetChainConfig
+	case 3:
+		return params.RopstenChainConfig
+	case 4:
+		return params.RinkebyChainConfig
+	case 5:
+		return params.GoerliChainConfig
+	default:
+		return params.AllEthashProtocolChanges
+	}
 }
 
 func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
@@ -277,6 +309,13 @@ func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
 		price = utils.GlobalBig(ctx, PriceFlag.Name)
 	}
 
+	// Get chain id
+	chainId, err := rpcClient.ChainID(rpcCtx)
+	if err != nil {
+		return err
+	}
+	chainConfig := getChainConfig(chainId.Uint64())
+
 	// Get current block header to generate runtime config
 	// If tx is not specified, get the latest block header, else:
 	// for a pending tx, get the latest block header
@@ -295,8 +334,9 @@ func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
 		parentBlockNum = header.Number
 	}
 
+	mp := ctx.GlobalInt(MaxProcsFlag.Name)
 	stateDB := fakestate.NewStateDB()
-	fetcher := fakestate.NewStateFetcher(stateDB, rpc, 6)
+	fetcher := fakestate.NewStateFetcher(stateDB, rpc, parentBlockNum, mp)
 	defer fetcher.Close()
 
 	// Load sender and receiver states from remote Geth server
@@ -311,7 +351,7 @@ func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
 			end--
 		}
 		if end > start {
-			fetcher.Fetch(accounts[start:end], keys[start:end], parentBlockNum)
+			fetcher.Fetch(accounts[start:end], keys[start:end])
 		}
 	}
 
@@ -334,7 +374,7 @@ func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
 
 	// Set runtime config
 	runtimeConfig := runtime.Config{
-		ChainConfig: params.MainnetChainConfig,
+		ChainConfig: chainConfig,
 		Origin:      *sender,
 		GasLimit:    header.GasLimit,
 		GasPrice:    price,
@@ -344,17 +384,13 @@ func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
 		Coinbase:    header.Coinbase,
 		BlockNumber: txBlockNum,
 
-		EVMConfig: vm.Config{
-			Tracer: vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin),
-			Debug:  true,
-		},
 		BaseFee: header.BaseFee,
 
 		State:     stateDB.Copy(),
 		GetHashFn: bhCache.GetHashFn,
 		Fetcher:   fetcher,
 	}
-	return runTx(ctx, &runtimeConfig, receiver, code, input)
+	return runTx(ctx, &runtimeConfig, sender, receiver, code, input)
 }
 
 func parseCode(ctx *cli.Context) []byte {
@@ -394,47 +430,124 @@ func parseCode(ctx *cli.Context) []byte {
 	return nil
 }
 
-func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, receiver *common.Address, code []byte, input []byte) error {
-	var execFunc func() ([]byte, uint64, error)
-	if receiver == nil || ctx.GlobalBool(CreateFlag.Name) {
-		input = append(code, input...)
-		execFunc = func() ([]byte, uint64, error) {
-			output, _, gasLeft, err := runtime.Create(input, runtimeConfig)
-			return output, gasLeft, err
-		}
-	} else {
-		if len(code) > 0 {
-			runtimeConfig.State.SetCode(*receiver, code)
-		}
-		execFunc = func() ([]byte, uint64, error) {
-			return runtime.Call(*receiver, input, runtimeConfig)
-		}
+func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Address, receiver *common.Address, code []byte, input []byte) error {
+
+	mr := ctx.GlobalInt(MaxRoundsFlag.Name)
+	round := 0
+	totalAccountNum := 0
+	totalSlotNum := 0
+	batches := make([]int, 0, 1)
+
+	logconfig := &vm.LogConfig{
+		EnableMemory:     !ctx.GlobalBoolT(DisableMemoryFlag.Name),
+		DisableStack:     ctx.GlobalBoolT(DisableStackFlag.Name),
+		DisableStorage:   ctx.GlobalBoolT(DisableStorageFlag.Name),
+		EnableReturnData: !ctx.GlobalBoolT(DisableReturnDataFlag.Name),
+		Debug:            ctx.GlobalBool(DebugFlag.Name),
+	}
+	tracer := vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin, logconfig)
+	runtimeConfig.EVMConfig = vm.Config{
+		Tracer: tracer,
+		Debug:  true,
 	}
 
-	bench := ctx.GlobalBool(BenchFlag.Name)
-	output, _, stats, err := timedExec(bench, execFunc)
+	fmt.Printf("\n\nInitial state access\n")
+	fmt.Printf("Sender: %v\n", sender)
+	fmt.Printf("Receiver: %v\n", receiver)
 
-	if bench {
-		fmt.Fprintf(os.Stderr, "execution time: %v\n allocations: %d\n allocated bytes: %d",
-			stats.time, stats.allocs, stats.bytesAllocated)
-	}
+	for {
+		fmt.Printf("\n\nROUND %d\n", round)
 
-	if alTracer, ok := runtimeConfig.EVMConfig.Tracer.(*vm.AccessListTracer); ok {
-		fmt.Printf("0x%x\n", output)
-		if err != nil {
-			fmt.Printf(" error: %v\n", err)
-		}
-		fmt.Printf("----- Access List -----\n")
-		al := alTracer.AccessList()
-		for _, tuple := range al {
-			fmt.Printf("%v\n", tuple.Address)
-			for _, slot := range tuple.StorageKeys {
-				fmt.Printf("\t%v\n", slot.Hex())
+		var execFunc func() ([]byte, uint64, error)
+		if receiver == nil || ctx.GlobalBool(CreateFlag.Name) {
+			input = append(code, input...)
+			execFunc = func() ([]byte, uint64, error) {
+				output, _, gasLeft, err := runtime.Create(input, runtimeConfig)
+				return output, gasLeft, err
+			}
+		} else {
+			if len(code) > 0 {
+				runtimeConfig.State.SetCode(*receiver, code)
+			}
+			execFunc = func() ([]byte, uint64, error) {
+				return runtime.Call(*receiver, input, runtimeConfig)
 			}
 		}
 
+		bench := ctx.GlobalBool(BenchFlag.Name)
+		_, _, stats, _ := timedExec(bench, execFunc)
+
+		if bench {
+			fmt.Fprintf(os.Stdout, "execution time: %v\n allocations: %d\n allocated bytes: %d",
+				stats.time, stats.allocs, stats.bytesAllocated)
+		}
+
+		newAccounts := tracer.GetNewAccounts()
+		newSlots := tracer.GetNewStorageSlots()
+
+		slotCount := newSlots.StorageKeys()
+		totalAccountNum += len(newAccounts)
+		totalSlotNum += slotCount
+
+		batch := len(newAccounts) + slotCount
+		batches = append(batches, batch)
+
+		printNewStateAccess(newAccounts, newSlots)
+		round++
+		if !tracer.HasMore || mr > 0 && round >= mr || tracer.HasMore && batch == 0 {
+			break
+		}
+
+		// Fetch new access list
+		accountsToFetch := make([]*common.Address, 0, batch)
+		keysToFetch := make([]*common.Hash, 0, batch)
+		for _, account := range newAccounts {
+			accountsToFetch = append(accountsToFetch, &account)
+			keysToFetch = append(keysToFetch, nil)
+		}
+		for _, tuple := range newSlots {
+			for _, slot := range tuple.StorageKeys {
+				accountsToFetch = append(accountsToFetch, &tuple.Address)
+				keysToFetch = append(keysToFetch, &slot)
+			}
+		}
+
+		// Prepare for next round
+		runtimeConfig.Fetcher.Fetch(accountsToFetch, keysToFetch)
+		runtimeConfig.State = runtimeConfig.Fetcher.CopyStatedb()
+		tracer.AppendListToKnownList()
 	}
+
+	// Summary
+	fmt.Printf("\n\nSummary\n")
+	fmt.Printf("\tTotal rounds:         %d\n", round)
+	fmt.Printf("\tTotal accounts:       %d\n", totalAccountNum)
+	fmt.Printf("\tTotal storage slots:  %d\n", totalSlotNum)
+	fmt.Printf("\tRetrieval batches:    %v\n", batches)
+
 	return nil
+}
+
+func printNewStateAccess(accounts []common.Address, slots types.AccessList) {
+
+	fmt.Printf("\tNew state access\n")
+
+	fmt.Printf("\t\tAccounts:\n")
+	if len(accounts) > 0 {
+		for _, account := range accounts {
+			fmt.Printf("\t\t\t%v\n", account)
+		}
+	}
+
+	fmt.Printf("\t\tStorage slots:\n")
+	if len(slots) > 0 {
+		for _, tuple := range slots {
+			fmt.Printf("\t\t\t%v\n", tuple.Address)
+			for _, slot := range tuple.StorageKeys {
+				fmt.Printf("\t\t\t\t%v\n", slot.Hex())
+			}
+		}
+	}
 }
 
 func init() {
@@ -452,6 +565,13 @@ func init() {
 		InputFlag,
 		SenderFlag,
 		ReceiverFlag,
+		MaxProcsFlag,
+		MaxRoundsFlag,
+		DebugFlag,
+		DisableMemoryFlag,
+		DisableStackFlag,
+		DisableStorageFlag,
+		DisableReturnDataFlag,
 	}
 
 	app.Commands = []cli.Command{

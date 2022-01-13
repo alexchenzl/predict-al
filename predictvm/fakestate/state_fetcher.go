@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	goruntime "runtime"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -21,6 +22,7 @@ type StateFetcher struct {
 	statedb  *FakeStateDB
 	maxProcs int
 	url      string
+	blockNum *big.Int
 
 	lock sync.Mutex // Protect statdb
 
@@ -29,11 +31,20 @@ type StateFetcher struct {
 	term chan struct{} // Channel to signal iterruption
 }
 
-func NewStateFetcher(statedb *FakeStateDB, url string, maxProcs int) *StateFetcher {
+func NewStateFetcher(statedb *FakeStateDB, url string, blockNum *big.Int, maxProcs int) *StateFetcher {
+
+	if maxProcs <= 0 {
+		maxProcs = goruntime.NumCPU()
+		if maxProcs > 1 {
+			maxProcs -= 1
+		}
+	}
+
 	sf := &StateFetcher{
 		statedb:  statedb,
 		maxProcs: maxProcs,
 		url:      url,
+		blockNum: blockNum,
 		req:      make(chan *StateRequest),
 		stop:     make(chan struct{}),
 		term:     make(chan struct{}),
@@ -55,18 +66,17 @@ func (sf *StateFetcher) CopyStatedb() *FakeStateDB {
 	return sf.statedb.Copy()
 }
 
-func (sf *StateFetcher) Fetch(accounts []*common.Address, keys []*common.Hash, blockNum *big.Int) error {
+func (sf *StateFetcher) Fetch(accounts []*common.Address, keys []*common.Hash) error {
 
 	if accounts == nil || keys == nil || len(accounts) != len(keys) {
 		return errors.New("invalid parameters")
 	}
 
 	requests := make([]StateRequest, len(accounts))
-
 	for i := 0; i < len(accounts); i++ {
 		requests[i].Address = accounts[i]
 		requests[i].Key = keys[i]
-		requests[i].BlockNumber = blockNum
+		requests[i].BlockNumber = sf.blockNum
 		requests[i].Done = make(chan struct{})
 		sf.req <- &requests[i]
 	}

@@ -48,6 +48,8 @@ type ScopeContext struct {
 	Memory   *Memory
 	Stack    *Stack
 	Contract *Contract
+	// record the execution count of jumpi opcodes
+	Jumpis map[uint64]int
 }
 
 // keccakState wraps sha3.state. In addition to the usual hash methods, it also supports
@@ -146,10 +148,12 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 	var (
 		mem         = NewMemory() // bound memory
 		stack       = newstack()  // local stack
+		jumps       = make(map[uint64]int)
 		callContext = &ScopeContext{
 			Memory:   mem,
 			Stack:    stack,
 			Contract: contract,
+			Jumpis:   jumps,
 		}
 		// For optimisation reason we're using uint64 as the program counter.
 		// It's theoretically possible to go above 2^64. The YP defines the PC
@@ -179,10 +183,12 @@ func (in *EVMInterpreter) RunBranch(pc uint64) (ret []byte, err error) {
 	var (
 		mem            = NewMemory() // bound memory
 		stack          = newstack()  // local stack
+		jumpis         = make(map[uint64]int)
 		newCallContext = &ScopeContext{
 			Memory:   mem,
 			Stack:    stack,
 			Contract: callContext.Contract,
+			Jumpis:   jumpis,
 		}
 	)
 
@@ -198,6 +204,11 @@ func (in *EVMInterpreter) RunBranch(pc uint64) (ret []byte, err error) {
 	// Clone the memory
 	mem.lastGasCost = callContext.Memory.lastGasCost
 	mem.store = callContext.Memory.GetCopy(0, int64(callContext.Memory.Len()))
+
+	// Clone the jumpis
+	for k, v := range callContext.Jumpis {
+		jumpis[k] = v
+	}
 
 	// snapshot is not implemented yet, so clone the statedb instead
 	statedb := in.evm.StateDB
@@ -233,6 +244,7 @@ func (in *EVMInterpreter) runOpCodes(pc uint64) (ret []byte, err error) {
 				if !logged {
 					in.cfg.Tracer.CaptureState(in.evm, pcCopy, op, gasCopy, cost, callContext, in.returnData, in.evm.depth, err)
 				} else {
+					// Append error information to last trace log
 					in.cfg.Tracer.CaptureFault(in.evm, pcCopy, op, gasCopy, cost, callContext, in.evm.depth, err)
 				}
 			}
@@ -278,10 +290,10 @@ func (in *EVMInterpreter) runOpCodes(pc uint64) (ret []byte, err error) {
 			}
 		}
 		// Static portion of gas
-		cost = operation.constantGas // For tracing
-		if !callContext.Contract.UseGas(operation.constantGas) {
-			return nil, ErrOutOfGas
-		}
+		//cost = operation.constantGas // For tracing
+		//if !callContext.Contract.UseGas(operation.constantGas) {
+		//	return nil, ErrOutOfGas
+		//}
 
 		var memorySize uint64
 		// calculate the new memory size and expand the memory to fit
@@ -302,14 +314,14 @@ func (in *EVMInterpreter) runOpCodes(pc uint64) (ret []byte, err error) {
 		// Dynamic portion of gas
 		// consume the gas and return an error if not enough gas is available.
 		// cost is explicitly set so that the capture state defer method can get the proper cost
-		if operation.dynamicGas != nil {
-			var dynamicCost uint64
-			dynamicCost, err = operation.dynamicGas(in.evm, callContext.Contract, callContext.Stack, callContext.Memory, memorySize)
-			cost += dynamicCost // total cost, for debug tracing
-			if err != nil || !callContext.Contract.UseGas(dynamicCost) {
-				return nil, ErrOutOfGas
-			}
-		}
+		//if operation.dynamicGas != nil {
+		//	var dynamicCost uint64
+		//	dynamicCost, err = operation.dynamicGas(in.evm, callContext.Contract, callContext.Stack, callContext.Memory, memorySize)
+		//	cost += dynamicCost // total cost, for debug tracing
+		//	if err != nil || !callContext.Contract.UseGas(dynamicCost) {
+		//		return nil, ErrOutOfGas
+		//	}
+		//}
 		if memorySize > 0 {
 			callContext.Memory.Resize(memorySize)
 		}
