@@ -4,17 +4,6 @@ Prototype to predict Ethereum transactions' access lists. The project comes from
 The current design is to use a simplified EVM to execute transaction payloads, and record the access list at the same time. 
 Most of the source code is based on [go-ethereum](https://github.com/ethereum/go-ethereum.git).
 
-Now it can only run against very simple bytecodes.
-
-TODO:
-* Implement a state fetcher that fetches states from remote Geth nodes.
-* Run the engine repeatedly to predict more accesses after it retrieves states that predicted in last round
-* Make this engine run against massive history transactions to check whether it works well in real world
-* Refactor and optimize the implementation
-* Benchmark testing
-* ...
-
-
 
 ## Building
 
@@ -31,8 +20,23 @@ $ go build ./cmd/predict
 ## Running
 
 ```shell
+# Check command help
 $ ./predict --help 
 
-$ ./predict --code 60f15400 run
+# Provide RPC to fetch ethereum states on demand as it is needed, the tool will fetch ChainID to initialize the chain config 
+$ ./predict --rpc  http://localhost:8545
+
+# Re-execute a transaction from history referenced by it's hash
+$ ./predict --rpc  http://localhost:8545 --tx hash
+
+# Execute a new "transaction" with manually specified fields for sender/receiver/value/input data
+$ ./predict --rpc  http://localhost:8545 --sender from --receiver to --input data
+
+# Raw execute some code
+$ ./predict --code 60f15400 --sender from --receiver to 
+
+# display every step of transaction execution, stack, storage, memory and return data can be enabled or disabled
+$ ./predict --code 60f15400 --debug --nostack=false --nostorage=false --nomemory=true
+
 ```
 
