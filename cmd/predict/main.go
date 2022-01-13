@@ -36,44 +36,32 @@ func NewApp(usage string) *cli.App {
 }
 
 var (
-	app = NewApp("the evm command line interface")
+	app = NewApp("a tool to predict transaction data access list")
 
 	RpcFlag = cli.StringFlag{
 		Name:  "rpc",
-		Usage: "Remote Geth RPC url",
+		Usage: "Remote Geth HTTP RPC url",
 	}
-
 	TxHashFlag = cli.StringFlag{
 		Name:  "tx",
-		Usage: "Transaction hash",
+		Usage: "The transaction hash",
 	}
-
-	BlockNumFlag = cli.StringFlag{
-		Name:  "block",
-		Usage: "Block number",
-	}
-
 	CodeFlag = cli.StringFlag{
 		Name:  "code",
-		Usage: "EVM code",
+		Usage: "Raw EVM code",
 	}
 	CodeFileFlag = cli.StringFlag{
 		Name:  "codefile",
 		Usage: "File containing EVM code. If '-' is specified, code is read from stdin ",
 	}
-	PriceFlag = utils.BigFlag{
-		Name:  "price",
-		Usage: "price set for the evm",
-		Value: new(big.Int),
-	}
 	ValueFlag = utils.BigFlag{
 		Name:  "value",
-		Usage: "value set for the evm",
+		Usage: "The transaction value",
 		Value: new(big.Int),
 	}
 	InputFlag = cli.StringFlag{
 		Name:  "input",
-		Usage: "input for the EVM",
+		Usage: "The transaction input data",
 	}
 	VerbosityFlag = cli.IntFlag{
 		Name:  "verbosity",
@@ -89,41 +77,41 @@ var (
 	}
 	SenderFlag = cli.StringFlag{
 		Name:  "sender",
-		Usage: "The transaction origin",
+		Usage: "The transaction origin (From)",
 	}
 	ReceiverFlag = cli.StringFlag{
 		Name:  "receiver",
-		Usage: "The transaction receiver (execution context)",
+		Usage: "The transaction receiver (To)",
 	}
 	MaxProcsFlag = cli.IntFlag{
 		Name:  "mp",
-		Usage: "max number of concurrent requests in the state fetcher",
+		Usage: "Max number of concurrent requests in the state fetcher, 0 means it will be set according to logical CPUs",
 		Value: 0,
 	}
 	MaxRoundsFlag = cli.IntFlag{
 		Name:  "mr",
-		Usage: "max rounds to predict access list",
+		Usage: "Max rounds to run, 0 means it will run until there's no new data access found",
 		Value: 0,
 	}
 	DebugFlag = cli.BoolFlag{
 		Name:  "debug",
-		Usage: "output full evm execution trace logs",
+		Usage: "Output full evm execution trace logs if this flag is set",
 	}
 	DisableMemoryFlag = cli.BoolTFlag{
 		Name:  "nomemory",
-		Usage: "disable memory output",
+		Usage: "disable memory output, default true",
 	}
 	DisableStackFlag = cli.BoolTFlag{
 		Name:  "nostack",
-		Usage: "disable stack output",
+		Usage: "disable stack output, default true",
 	}
 	DisableStorageFlag = cli.BoolTFlag{
 		Name:  "nostorage",
-		Usage: "disable storage output",
+		Usage: "disable storage output, default true",
 	}
 	DisableReturnDataFlag = cli.BoolTFlag{
 		Name:  "noreturndata",
-		Usage: "enable return data output",
+		Usage: "enable return data output, default true",
 	}
 
 	OriginCommandHelpTemplate = `{{.Name}}{{if .Subcommands}} command{{end}}{{if .Flags}} [command options]{{end}} {{.ArgsUsage}}
@@ -211,7 +199,7 @@ func runCmd(ctx *cli.Context) error {
 		Origin:      sender,
 		State:       statedb,
 		GasLimit:    uint64(10000000000),
-		GasPrice:    utils.GlobalBig(ctx, PriceFlag.Name),
+		GasPrice:    new(big.Int),
 		Value:       utils.GlobalBig(ctx, ValueFlag.Name),
 		Difficulty:  new(big.Int),
 		Time:        new(big.Int).SetInt64(time.Now().Unix()),
@@ -224,6 +212,10 @@ func runCmd(ctx *cli.Context) error {
 	hexInput := []byte(ctx.GlobalString(InputFlag.Name))
 	input := common.FromHex(string(bytes.TrimSpace(hexInput)))
 	code := parseCode(ctx)
+
+	if code == nil {
+		cli.ShowAppHelpAndExit(ctx, 1)
+	}
 
 	return runTx(ctx, &runtimeConfig, &sender, &receiver, code, input)
 }
@@ -306,7 +298,7 @@ func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
 		value = utils.GlobalBig(ctx, ValueFlag.Name)
 
 		code = parseCode(ctx)
-		price = utils.GlobalBig(ctx, PriceFlag.Name)
+		price = new(big.Int)
 	}
 
 	// Get chain id
@@ -553,14 +545,12 @@ func printNewStateAccess(accounts []common.Address, slots types.AccessList) {
 func init() {
 	app.Flags = []cli.Flag{
 		RpcFlag,
-		BlockNumFlag,
 		TxHashFlag,
 		BenchFlag,
 		CreateFlag,
 		VerbosityFlag,
 		CodeFlag,
 		CodeFileFlag,
-		PriceFlag,
 		ValueFlag,
 		InputFlag,
 		SenderFlag,
@@ -574,9 +564,8 @@ func init() {
 		DisableReturnDataFlag,
 	}
 
-	app.Commands = []cli.Command{
-		runCommand,
-	}
+	app.Action = runCmd
+
 	cli.CommandHelpTemplate = OriginCommandHelpTemplate
 }
 
