@@ -29,7 +29,7 @@ func TestFetcher(t *testing.T) {
 
 	url := os.Getenv("GETH_RPC_TESTING")
 	statedb := NewStateDB()
-	fetcher := NewStateFetcher(statedb, url, 5)
+	fetcher := NewStateFetcher(statedb, url, big.NewInt(13_650_000), 0)
 
 	defer fetcher.Close()
 
@@ -49,7 +49,7 @@ func TestFetcher(t *testing.T) {
 	keys[1] = &hash1
 	keys[2] = &hash2
 
-	fetcher.Fetch(accounts, keys, big.NewInt(13_650_000))
+	fetcher.Fetch(accounts, keys)
 
 	stateObj := statedb.getStateObject(address)
 
