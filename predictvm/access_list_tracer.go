@@ -26,11 +26,11 @@ import (
 )
 
 // accessList is an accumulator for the set of accounts and storage slots an EVM
-// contract execution touches.
+// contract execution Touches.
 type accessList map[common.Address]accessListSlots
 
 // accessListSlots is an accumulator for the set of storage slots within a single
-// contract that an EVM contract execution touches.
+// contract that an EVM contract execution Touches.
 type accessListSlots map[common.Hash]struct{}
 
 // newAccessList creates a new accessList.
@@ -125,23 +125,27 @@ type AccessListTracer struct {
 	excl      map[common.Address]struct{} // Set of account to exclude from the list
 	list      accessList                  // Set of accounts and storage slots touched
 	knownList accessList                  // Already known accounts and storage slots in last rounds
-	HasMore   bool
-	logger    *StructLogger
+	Touches   int                         // Total state access times
+	HasMore   bool                        // Whether there's more unknown states in this round
+	logger    *StructLogger               // Detailed debug information logger
 }
 
 // NewAccessListTracer creates a new tracer that can generate AccessLists.
 // An optional AccessList can be set as already known AccessList
 func NewAccessListTracer(acl types.AccessList, from, to *common.Address, precompiles []common.Address, cfg *LogConfig) *AccessListTracer {
-	excl := map[common.Address]struct{}{*from: {}}
-	if to != nil {
-		excl[*to] = struct{}{}
-	}
-
+	excl := map[common.Address]struct{}{}
 	for _, addr := range precompiles {
 		excl[addr] = struct{}{}
 	}
+
 	list := newAccessList()
 	knownList := newAccessList()
+
+	knownList.addAddress(*from)
+	if to != nil {
+		knownList.addAddress(*to)
+	}
+
 	for _, al := range acl {
 		if _, ok := excl[al.Address]; !ok {
 			knownList.addAddress(al.Address)
@@ -177,6 +181,14 @@ func (a *AccessListTracer) AppendListToKnownList() {
 		}
 	}
 	a.list = newAccessList()
+}
+
+func (a *AccessListTracer) GetKnowAccounts() []common.Address {
+	accounts := make([]common.Address, 0, len(a.knownList))
+	for addr := range a.knownList {
+		accounts = append(accounts, addr)
+	}
+	return accounts
 }
 
 // GetNewAccounts return new accounts found in this round
@@ -231,6 +243,8 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 			// This slot address depends on another unknown storage slot
 			a.HasMore = true
 		}
+		a.Touches++
+		//fmt.Printf("%x\t%v\t%v %v\n", pc, op, scope.Contract.Address(), loc.Hex())
 	}
 	if (op == EXTCODECOPY || op == EXTCODEHASH || op == EXTCODESIZE || op == BALANCE || op == SELFDESTRUCT) && stack.len() >= 1 {
 		loc := stack.data[stack.len()-1]
@@ -244,6 +258,8 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 		} else {
 			a.HasMore = true
 		}
+		a.Touches++
+		//fmt.Printf("%x\t%v\t%v\n", pc, op, loc.Hex())
 	}
 	if (op == DELEGATECALL || op == CALL || op == STATICCALL || op == CALLCODE) && stack.len() >= 5 {
 		loc := stack.data[stack.len()-2]
@@ -259,6 +275,8 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 		} else {
 			a.HasMore = true
 		}
+		a.Touches++
+		//fmt.Printf("%x\t%v\t%v\n", pc, op, loc.Hex())
 	}
 }
 

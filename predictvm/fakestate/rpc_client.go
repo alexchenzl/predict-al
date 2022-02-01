@@ -234,8 +234,8 @@ func (ec *RpcClient) GetBlockHeader(ctx context.Context, blockNumber *big.Int) (
 }
 
 // GetBlock returns block header and its transactions, but without uncles
-func (ec *RpcClient) GetBlock(ctx context.Context, blockNumber *big.Int) {
-
+func (ec *RpcClient) GetBlock(ctx context.Context, blockNumber *big.Int) (*types.Block, error) {
+	return ec.getBlock(ctx, "eth_getBlockByNumber", toBlockNumArg(blockNumber), true)
 }
 
 type RpcTransaction struct {
@@ -308,7 +308,7 @@ func (ec *RpcClient) getBlock(ctx context.Context, method string, args ...interf
 // GetRecentBlockHashes get specified count of most recent block hashes, including the current one
 func (ec *RpcClient) GetRecentBlockHashes(ctx context.Context, blockNumber *big.Int, count int) (map[uint64]common.Hash, error) {
 	var maxNumber uint64
-	if blockNumber == nil || blockNumber.Cmp(big.NewInt(-1)) == 0 {
+	if blockNumber == nil {
 		num, err := ec.BlockNumber(ctx)
 		if err != nil {
 			return nil, err
@@ -362,8 +362,8 @@ func (ec *RpcClient) GetTransactionByHash(ctx context.Context, hash common.Hash)
 	} else if _, r, _ := json.Tx.RawSignatureValues(); r == nil {
 		return nil, false, fmt.Errorf("server returned transaction without signature")
 	}
-	//if json.From != nil && json.BlockHash != nil {
-	//	setSenderFromServer(json.Tx, *json.From, *json.BlockHash)
-	//}
+	if json.From != nil && json.BlockHash != nil {
+		setSenderFromServer(json.Tx, *json.From, *json.BlockHash)
+	}
 	return json, json.BlockNumber == nil, nil
 }

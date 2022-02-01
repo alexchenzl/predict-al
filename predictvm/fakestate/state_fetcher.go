@@ -68,6 +68,10 @@ func (sf *StateFetcher) CopyStatedb() *FakeStateDB {
 
 func (sf *StateFetcher) Fetch(accounts []*common.Address, keys []*common.Hash) error {
 
+	if sf.blockNum != nil && sf.blockNum.Sign() < 0 {
+		return nil
+	}
+
 	if accounts == nil || keys == nil || len(accounts) != len(keys) {
 		return errors.New("invalid parameters")
 	}
@@ -88,6 +92,16 @@ func (sf *StateFetcher) Fetch(accounts []*common.Address, keys []*common.Hash) e
 		}
 	}
 	return nil
+}
+
+func (sf *StateFetcher) FetchFromAndTo(from *common.Address, to *common.Address) error {
+	var accounts = [2]*common.Address{from, to}
+	var keys [2]*common.Hash
+	end := 2
+	if to == nil {
+		end = 1
+	}
+	return sf.Fetch(accounts[:end], keys[:end])
 }
 
 func (sf *StateFetcher) process(req *StateRequest) {

@@ -29,11 +29,11 @@ $ ./predict --rpc  http://localhost:8545
 # Re-execute a transaction from history referenced by it's hash
 $ ./predict --rpc  http://localhost:8545 --tx hash
 
-# Execute a new "transaction" with manually specified fields for sender/receiver/value/input data
-$ ./predict --rpc  http://localhost:8545 --sender from --receiver to --input data
+# Execute a new "transaction" with manually specified fields for from/to/value/data
+$ ./predict --rpc  http://localhost:8545 --from sender --to receiver  --data data
 
 # Raw execute some code
-$ ./predict --code 60f15400 --sender from --receiver to 
+$ ./predict --code 60f15400 --from sender --to receiver 
 
 # display every step of transaction execution, stack, storage, memory and return data can be enabled or disabled
 $ ./predict --code 60f15400 --debug --nostack=false --nostorage=false --nomemory=true

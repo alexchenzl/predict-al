@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"gopkg.in/urfave/cli.v1"
 	"io/ioutil"
@@ -10,7 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
-	"testing"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/cmd/utils"
@@ -42,9 +45,18 @@ var (
 		Name:  "rpc",
 		Usage: "Remote Geth HTTP RPC url",
 	}
+	OutFlag = cli.StringFlag{
+		Name:  "out",
+		Usage: "file to save prediction result",
+	}
 	TxHashFlag = cli.StringFlag{
 		Name:  "tx",
-		Usage: "The transaction hash",
+		Usage: "Hash of the history transaction to be executed",
+	}
+	BlockFlag = cli.Int64Flag{
+		Name:  "block",
+		Usage: "Height of the history block within which all transactions contained will be executed. If tx is provided, block would be ignored",
+		Value: -1,
 	}
 	CodeFlag = cli.StringFlag{
 		Name:  "code",
@@ -59,28 +71,24 @@ var (
 		Usage: "The transaction value",
 		Value: new(big.Int),
 	}
-	InputFlag = cli.StringFlag{
-		Name:  "input",
+	DataFlag = cli.StringFlag{
+		Name:  "data",
 		Usage: "The transaction input data",
 	}
 	VerbosityFlag = cli.IntFlag{
 		Name:  "verbosity",
 		Usage: "sets the verbosity level",
 	}
-	BenchFlag = cli.BoolFlag{
-		Name:  "bench",
-		Usage: "benchmark the execution",
-	}
 	CreateFlag = cli.BoolFlag{
 		Name:  "create",
 		Usage: "indicates the action should be create rather than call",
 	}
-	SenderFlag = cli.StringFlag{
-		Name:  "sender",
-		Usage: "The transaction origin (From)",
+	FromFlag = cli.StringFlag{
+		Name:  "from",
+		Usage: "The transaction origin",
 	}
-	ReceiverFlag = cli.StringFlag{
-		Name:  "receiver",
+	ToFlag = cli.StringFlag{
+		Name:  "to",
 		Usage: "The transaction receiver (To)",
 	}
 	MaxProcsFlag = cli.IntFlag{
@@ -134,98 +142,6 @@ var runCommand = cli.Command{
 	Description: `The run command runs arbitrary EVM code.`,
 }
 
-type execStats struct {
-	time           time.Duration // The execution time.
-	allocs         int64         // The number of heap allocations during execution.
-	bytesAllocated int64         // The cumulative number of bytes allocated during execution.
-}
-
-func timedExec(bench bool, execFunc func() ([]byte, uint64, error)) (output []byte, gasLeft uint64, stats execStats, err error) {
-	if bench {
-		result := testing.Benchmark(func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
-				output, gasLeft, err = execFunc()
-			}
-		})
-
-		// Get the average execution time from the benchmarking result.
-		// There are other useful stats here that could be reported.
-		stats.time = time.Duration(result.NsPerOp())
-		stats.allocs = result.AllocsPerOp()
-		stats.bytesAllocated = result.AllocedBytesPerOp()
-	} else {
-		var memStatsBefore, memStatsAfter goruntime.MemStats
-		goruntime.ReadMemStats(&memStatsBefore)
-		startTime := time.Now()
-		output, gasLeft, err = execFunc()
-		stats.time = time.Since(startTime)
-		goruntime.ReadMemStats(&memStatsAfter)
-		stats.allocs = int64(memStatsAfter.Mallocs - memStatsBefore.Mallocs)
-		stats.bytesAllocated = int64(memStatsAfter.TotalAlloc - memStatsBefore.TotalAlloc)
-	}
-
-	return output, gasLeft, stats, err
-}
-
-func runCmd(ctx *cli.Context) error {
-	glogger := log.NewGlogHandler(log.StreamHandler(os.Stderr, log.TerminalFormat(false)))
-	glogger.Verbosity(log.Lvl(ctx.GlobalInt(VerbosityFlag.Name)))
-	log.Root().SetHandler(glogger)
-
-	var (
-		statedb       *fakestate.FakeStateDB
-		sender        = common.BytesToAddress([]byte("sender"))
-		receiver      = common.BytesToAddress([]byte("receiver"))
-		genesisConfig *core.Genesis
-	)
-
-	if ctx.GlobalString(RpcFlag.Name) != "" {
-		return runCmdWithFetcher(ctx, ctx.GlobalString(RpcFlag.Name))
-	}
-
-	statedb = fakestate.NewStateDB()
-	genesisConfig = new(core.Genesis)
-
-	if ctx.GlobalString(SenderFlag.Name) != "" {
-		sender = common.HexToAddress(ctx.GlobalString(SenderFlag.Name))
-	}
-	statedb.CreateAccount(sender)
-
-	if ctx.GlobalString(ReceiverFlag.Name) != "" {
-		receiver = common.HexToAddress(ctx.GlobalString(ReceiverFlag.Name))
-	}
-
-	runtimeConfig := runtime.Config{
-		Origin:      sender,
-		State:       statedb,
-		GasLimit:    uint64(10000000000),
-		GasPrice:    new(big.Int),
-		Value:       utils.GlobalBig(ctx, ValueFlag.Name),
-		Difficulty:  new(big.Int),
-		Time:        new(big.Int).SetInt64(time.Now().Unix()),
-		Coinbase:    genesisConfig.Coinbase,
-		BlockNumber: new(big.Int).SetUint64(genesisConfig.Number),
-	}
-
-	runtimeConfig.ChainConfig = params.AllEthashProtocolChanges
-
-	hexInput := []byte(ctx.GlobalString(InputFlag.Name))
-	input := common.FromHex(string(bytes.TrimSpace(hexInput)))
-	code := parseCode(ctx)
-
-	if code == nil {
-		cli.ShowAppHelpAndExit(ctx, 1)
-	}
-
-	return runTx(ctx, &runtimeConfig, &sender, &receiver, code, input)
-}
-
-func createAddress(hex string) *common.Address {
-	address := new(common.Address)
-	address.SetBytes(common.FromHex(hex))
-	return address
-}
-
 func getChainConfig(chainID uint64) *params.ChainConfig {
 	switch chainID {
 	case 1:
@@ -241,148 +157,293 @@ func getChainConfig(chainID uint64) *params.ChainConfig {
 	}
 }
 
-func runCmdWithFetcher(ctx *cli.Context, rpc string) error {
-	rpcCtx := context.Background()
-	rpcClient, err := fakestate.DialContext(rpcCtx, rpc)
+func newChainConfig(client *fakestate.RpcClient) *params.ChainConfig {
+	chainId, err := client.ChainID(context.Background())
 	if err != nil {
-		return err
+		return params.AllEthashProtocolChanges
 	}
-	defer rpcClient.Close()
+	return getChainConfig(chainId.Uint64())
+}
 
-	var (
-		parentBlockNum *big.Int
-		blockNum       *big.Int
-		tx             *fakestate.RpcTransaction
-		pending        = true
+func newRuntimeConfig(header *types.Header, chainConfig *params.ChainConfig, txTime, txBlockNum *big.Int) *runtime.Config {
+	runtimeConfig := &runtime.Config{
+		ChainConfig: chainConfig,
+		GasLimit:    header.GasLimit,
+		Difficulty:  header.Difficulty,
+		Time:        txTime,
+		Coinbase:    header.Coinbase,
+		BlockNumber: txBlockNum,
+		BaseFee:     header.BaseFee,
+	}
+	return runtimeConfig
+}
 
-		sender   *common.Address
-		receiver *common.Address
-		value    *big.Int
-		input    []byte
-		code     []byte
-		price    *big.Int
-	)
+type txPredictTask struct {
+	tx    *types.Transaction
+	index int
+}
 
-	txHash := ctx.GlobalString(TxHashFlag.Name)
-	if len(txHash) > 0 {
-		// if txHash is specified, retrieve tx parameters from remote Geth node,
-		// arguments such as sender, receiver, value, input and code will be ignored
-		tx, pending, err = rpcClient.GetTransactionByHash(rpcCtx, common.HexToHash(txHash))
+type TxPredictResult struct {
+	H  string          `json:"h"`  // tx hash
+	Tt int             `json:"tt"` // total touches
+	Tr int             `json:"tr"` // total rounds
+	Ta int             `json:"ta"` // total accounts
+	Ts int             `json:"ts"` // total storage slots
+	Rd []TxRoundRecord `json:"rd"` // records of every round
+	E  string          `json:"e,omitempty"`
+}
+
+type TxRoundRecord struct {
+	A []common.Address `json:"a,omitempty"` // new addresses
+	S types.AccessList `json:"s,omitempty"` // new storage slots
+}
+
+func runCmd(ctx *cli.Context) error {
+	gLogger := log.NewGlogHandler(log.StreamHandler(os.Stderr, log.TerminalFormat(false)))
+	gLogger.Verbosity(log.Lvl(ctx.GlobalInt(VerbosityFlag.Name)))
+	log.Root().SetHandler(gLogger)
+
+	var err error
+	var result *TxPredictResult
+	rpc := ctx.GlobalString(RpcFlag.Name)
+	if rpc != "" {
+		rpcClient, err := fakestate.DialContext(context.Background(), rpc)
 		if err != nil {
 			return err
 		}
-		if !pending {
-			// history tx
-			blockNum, _ = new(big.Int).SetString(*tx.BlockNumber, 0)
-			parentBlockNum = blockNum.Sub(blockNum, big.NewInt(1))
-		}
+		defer rpcClient.Close()
 
-		sender = tx.From
-		receiver = tx.Tx.To()
-		value = tx.Tx.Value()
-		input = tx.Tx.Data()
-		price = tx.Tx.GasPrice()
+		txHash := ctx.GlobalString(TxHashFlag.Name)
+		block := ctx.GlobalInt64(BlockFlag.Name)
+		if txHash != "" {
+			result, err = runHistoryTransaction(ctx, rpc, rpcClient, txHash)
+		} else if block >= 0 {
+			var results []*TxPredictResult
+			results, err = runHistoryBlock(ctx, rpc, rpcClient, big.NewInt(block))
+			if err == nil {
+				outputResults(fmt.Sprintf("%v-%d", ctx.GlobalString(OutFlag.Name), block), results)
+				return nil
+			}
+		} else {
+			result, err = runNewTransaction(ctx, rpc, rpcClient)
+		}
 	} else {
-		// parse tx parameters from arguments
-		if ctx.GlobalString(SenderFlag.Name) != "" {
-			sender = new(common.Address)
-			sender.SetBytes(common.FromHex(ctx.GlobalString(SenderFlag.Name)))
-		}
-		if ctx.GlobalString(ReceiverFlag.Name) != "" {
-			receiver = new(common.Address)
-			receiver.SetBytes(common.FromHex(ctx.GlobalString(ReceiverFlag.Name)))
-		}
-
-		hexInput := []byte(ctx.GlobalString(InputFlag.Name))
-		input = common.FromHex(string(bytes.TrimSpace(hexInput)))
-		value = utils.GlobalBig(ctx, ValueFlag.Name)
-
-		code = parseCode(ctx)
-		price = new(big.Int)
+		result, err = runRawCodeLocally(ctx)
 	}
 
-	// Get chain id
-	chainId, err := rpcClient.ChainID(rpcCtx)
+	if err == nil {
+		results := make([]*TxPredictResult, 1)
+		results[0] = result
+		outputResults(ctx.GlobalString(OutFlag.Name), results)
+	}
+	return err
+}
+
+// runRawCodeLocally  will not fetch states from remote nodes
+func runRawCodeLocally(ctx *cli.Context) (*TxPredictResult, error) {
+	var (
+		from          = common.BytesToAddress([]byte("from"))
+		to            = common.BytesToAddress([]byte("to"))
+		genesisConfig = new(core.Genesis)
+	)
+
+	statedb := fakestate.NewStateDB()
+
+	if ctx.GlobalString(FromFlag.Name) != "" {
+		from = common.HexToAddress(ctx.GlobalString(FromFlag.Name))
+	}
+	statedb.CreateAccount(from)
+	if ctx.GlobalString(ToFlag.Name) != "" {
+		to = common.HexToAddress(ctx.GlobalString(ToFlag.Name))
+	}
+
+	runtimeConfig := runtime.Config{
+		ChainConfig: params.AllEthashProtocolChanges,
+		Origin:      from,
+		State:       statedb,
+		GasLimit:    uint64(10000000000),
+		GasPrice:    new(big.Int),
+		Value:       utils.GlobalBig(ctx, ValueFlag.Name),
+		Difficulty:  new(big.Int),
+		Time:        new(big.Int).SetInt64(time.Now().Unix()),
+		Coinbase:    genesisConfig.Coinbase,
+		BlockNumber: new(big.Int).SetUint64(genesisConfig.Number),
+	}
+
+	hexInput := []byte(ctx.GlobalString(DataFlag.Name))
+	input := common.FromHex(string(bytes.TrimSpace(hexInput)))
+	code := parseCode(ctx)
+
+	if code == nil {
+		cli.ShowAppHelpAndExit(ctx, 1)
+	}
+	return runTx(ctx, &runtimeConfig, &from, &to, code, input)
+}
+
+// runHistoryTransaction execute history transaction based on its parent block states
+// If it's a pending transaction, use the latest block header to create runtime configuration
+func runHistoryTransaction(ctx *cli.Context, rpc string, rpcClient *fakestate.RpcClient, txHash string) (*TxPredictResult, error) {
+
+	rpcCtx := context.Background()
+	// If txHash is provided, execute the history transaction, but it is also may be a pending tx
+	tx, pending, err := rpcClient.GetTransactionByHash(rpcCtx, common.HexToHash(txHash))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	chainConfig := getChainConfig(chainId.Uint64())
+
+	var blockNum *big.Int
+	if !pending {
+		blockNum, _ = new(big.Int).SetString(*tx.BlockNumber, 0)
+		if blockNum.Sign() == 0 {
+			return nil, errors.New("genesis is not predictable")
+		}
+	}
 
 	// Get current block header to generate runtime config
-	// If tx is not specified, get the latest block header, else:
 	// for a pending tx, get the latest block header
 	// for a history tx, get the block header in which the tx is included
 	header, err := rpcClient.GetBlockHeader(rpcCtx, blockNum)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	txTime := int64(header.Time)
 	txBlockNum := header.Number
+	parentBlockNum := header.Number
 	if pending {
 		txTime = time.Now().Unix()
-		txBlockNum = big.NewInt(txBlockNum.Int64() + 1)
-
-		parentBlockNum = header.Number
-	}
-
-	mp := ctx.GlobalInt(MaxProcsFlag.Name)
-	stateDB := fakestate.NewStateDB()
-	fetcher := fakestate.NewStateFetcher(stateDB, rpc, parentBlockNum, mp)
-	defer fetcher.Close()
-
-	// Load sender and receiver states from remote Geth server
-	if sender != nil || receiver != nil {
-		var accounts = [2]*common.Address{sender, receiver}
-		var keys [2]*common.Hash
-		start, end := 0, 2
-		if sender == nil {
-			start++
-		}
-		if receiver == nil {
-			end--
-		}
-		if end > start {
-			fetcher.Fetch(accounts[start:end], keys[start:end])
-		}
-	}
-
-	if sender == nil {
-		sender = createAddress("sender")
-		stateDB.CreateAccount(*sender)
-	}
-	// receiver should be nil if tx is a contract creation tx
-	if tx == nil && receiver == nil {
-		receiver = createAddress("receiver")
-	}
-
-	if code == nil && receiver != nil {
-		code = stateDB.GetCode(*receiver)
+		txBlockNum = big.NewInt(header.Number.Int64() + 1)
+	} else {
+		parentBlockNum = big.NewInt(header.Number.Int64() - 1)
 	}
 
 	// Load recent 256 block hashes
 	hashmap, err := rpcClient.GetRecentBlockHashes(rpcCtx, parentBlockNum, 256)
 	bhCache := fakestate.NewBlockHashCache(hashmap)
 
-	// Set runtime config
-	runtimeConfig := runtime.Config{
-		ChainConfig: chainConfig,
-		Origin:      *sender,
-		GasLimit:    header.GasLimit,
-		GasPrice:    price,
-		Value:       value,
-		Difficulty:  header.Difficulty,
-		Time:        big.NewInt(txTime),
-		Coinbase:    header.Coinbase,
-		BlockNumber: txBlockNum,
+	chainConfig := newChainConfig(rpcClient)
+	runtimeConfig := newRuntimeConfig(header, chainConfig, big.NewInt(txTime), txBlockNum)
+	runtimeConfig.GetHashFn = bhCache.GetHashFn
 
-		BaseFee: header.BaseFee,
-
-		State:     stateDB.Copy(),
-		GetHashFn: bhCache.GetHashFn,
-		Fetcher:   fetcher,
+	result, err := runPredictTxTask(ctx, rpc, runtimeConfig, tx.From, tx.Tx.To(), tx.Tx.Value(), tx.Tx.GasPrice(), tx.Tx.Data(), nil)
+	if err == nil {
+		result.H = tx.Tx.Hash().Hex()
 	}
-	return runTx(ctx, &runtimeConfig, sender, receiver, code, input)
+	return result, err
+}
+
+// runNewTransaction execute a new transaction, runtime configuration is created from the latest block header
+// if code is provided, the code in fetched state will be overridden. Sender must be provided.
+func runNewTransaction(ctx *cli.Context, rpc string, rpcClient *fakestate.RpcClient) (*TxPredictResult, error) {
+	var (
+		from *common.Address
+		to   *common.Address
+	)
+
+	// from must be provided to run against a remote Geth node
+	if ctx.GlobalString(FromFlag.Name) == "" {
+		return nil, errors.New("to run a new transaction against a remote Geth node, from must be provided")
+	}
+	from = new(common.Address)
+	from.SetBytes(common.FromHex(ctx.GlobalString(FromFlag.Name)))
+
+	// if to is nil, this is a contract creation tx
+	if ctx.GlobalString(ToFlag.Name) != "" {
+		to = new(common.Address)
+		to.SetBytes(common.FromHex(ctx.GlobalString(ToFlag.Name)))
+	}
+
+	rpcCtx := context.Background()
+	// Get current block header to generate runtime runtimeConfig
+	header, err := rpcClient.GetBlockHeader(rpcCtx, nil)
+	if err != nil {
+		return nil, err
+	}
+	txBlockNum := big.NewInt(header.Number.Int64() + 1)
+
+	// Load recent 256 block hashes
+	hashmap, err := rpcClient.GetRecentBlockHashes(rpcCtx, header.Number, 256)
+	bhCache := fakestate.NewBlockHashCache(hashmap)
+
+	chainConfig := newChainConfig(rpcClient)
+	runtimeConfig := newRuntimeConfig(header, chainConfig, big.NewInt(time.Now().Unix()), txBlockNum)
+	runtimeConfig.GetHashFn = bhCache.GetHashFn
+
+	// provided code will override the fetched state
+	code := parseCode(ctx)
+	hexInput := []byte(ctx.GlobalString(DataFlag.Name))
+	input := common.FromHex(string(bytes.TrimSpace(hexInput)))
+	value := utils.GlobalBig(ctx, ValueFlag.Name)
+	return runPredictTxTask(ctx, rpc, runtimeConfig, from, to, value, new(big.Int), input, code)
+}
+
+// runHistoryBlock execute all transactions in this block concurrently based on its parent block states. Because this
+// is not an archive full node, it can not generate exact pre-states before executing a transaction in this block like
+// a tracer.
+func runHistoryBlock(ctx *cli.Context, rpc string, rpcClient *fakestate.RpcClient, blockNum *big.Int) ([]*TxPredictResult, error) {
+
+	if blockNum != nil && blockNum.Sign() == 0 {
+		return nil, errors.New("genesis is not predictable")
+	}
+
+	rpcCtx := context.Background()
+	block, err := rpcClient.GetBlock(rpcCtx, blockNum)
+	if err != nil {
+		return nil, err
+	}
+
+	txs := block.Transactions()
+	if len(txs) == 0 {
+		return nil, nil
+	}
+
+	chainConfig := newChainConfig(rpcClient)
+	// Load recent last 256 block hashes
+	hashmap, err := rpcClient.GetRecentBlockHashes(rpcCtx, big.NewInt(block.Number().Int64()-1), 256)
+	bhCache := fakestate.NewBlockHashCache(hashmap)
+
+	// Execute all the transaction contained within the block concurrently
+	var (
+		signer  = types.MakeSigner(chainConfig, block.Number())
+		results = make([]*TxPredictResult, len(txs))
+
+		pend = new(sync.WaitGroup)
+		jobs = make(chan *txPredictTask, len(txs))
+	)
+	threads := goruntime.NumCPU()
+	if threads > len(txs) {
+		threads = len(txs)
+	}
+
+	for th := 0; th < threads; th++ {
+		pend.Add(1)
+		go func() {
+			defer pend.Done()
+			for task := range jobs {
+				runtimeConfig := newRuntimeConfig(block.Header(), chainConfig, big.NewInt(int64(block.Time())), block.Number())
+				runtimeConfig.GetHashFn = bhCache.GetHashFn
+
+				tx := task.tx
+				msg, _ := tx.AsMessage(signer, block.BaseFee())
+				from := msg.From()
+				res, err := runPredictTxTask(ctx, rpc, runtimeConfig, &from, msg.To(), msg.Value(), msg.GasPrice(), msg.Data(), nil)
+				if err != nil {
+					results[task.index] = &TxPredictResult{H: tx.Hash().Hex(), E: err.Error()}
+				} else {
+					res.H = tx.Hash().Hex()
+					results[task.index] = res
+				}
+			}
+		}()
+	}
+
+	for i, tx := range txs {
+
+		jobs <- &txPredictTask{tx: tx, index: i}
+	}
+	close(jobs)
+	pend.Wait()
+	return results, err
 }
 
 func parseCode(ctx *cli.Context) []byte {
@@ -422,13 +483,32 @@ func parseCode(ctx *cli.Context) []byte {
 	return nil
 }
 
-func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Address, receiver *common.Address, code []byte, input []byte) error {
+func runPredictTxTask(ctx *cli.Context, rpc string, runtimeConfig *runtime.Config, from, to *common.Address, value, gasPrice *big.Int, data, code []byte) (*TxPredictResult, error) {
+	stateDB := fakestate.NewStateDB()
+	// states need to be fetched from parent block
+	fetcher := fakestate.NewStateFetcher(stateDB, rpc, big.NewInt(runtimeConfig.BlockNumber.Int64()-1), ctx.GlobalInt(MaxProcsFlag.Name))
+	defer fetcher.Close()
 
-	mr := ctx.GlobalInt(MaxRoundsFlag.Name)
-	round := 0
-	totalAccountNum := 0
-	totalSlotNum := 0
-	batches := make([]int, 0, 1)
+	// fetch initial states from and to accounts
+	fetcher.FetchFromAndTo(from, to)
+	if to != nil && code == nil {
+		code = stateDB.GetCode(*to)
+	}
+
+	runtimeConfig.Fetcher = fetcher
+	runtimeConfig.State = fetcher.CopyStatedb()
+
+	runtimeConfig.Origin = *from
+	runtimeConfig.GasPrice = gasPrice
+	runtimeConfig.Value = value
+	return runTx(ctx, runtimeConfig, from, to, code, data)
+}
+
+func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Address, receiver *common.Address, code []byte, data []byte) (*TxPredictResult, error) {
+
+	//totalAccountNum := 0
+	//totalSlotNum := 0
+	//batches := make([]int, 0, 1)
 
 	logconfig := &vm.LogConfig{
 		EnableMemory:     !ctx.GlobalBoolT(DisableMemoryFlag.Name),
@@ -443,61 +523,56 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Addre
 		Debug:  true,
 	}
 
-	fmt.Printf("\n\nInitial state access\n")
-	fmt.Printf("Sender: %v\n", sender)
-	fmt.Printf("Receiver: %v\n", receiver)
+	creating := false
+	if receiver == nil || ctx.GlobalBool(CreateFlag.Name) {
+		data = append(code, data...)
+		creating = true
+	} else if len(code) > 0 {
+		runtimeConfig.State.SetCode(*receiver, code)
+	}
 
+	txResult := &TxPredictResult{
+		Rd: make([]TxRoundRecord, 1, 2),
+	}
+	// Initial state accesses
+	txResult.Rd[0] = TxRoundRecord{
+		A: tracer.GetKnowAccounts(),
+	}
+
+	round := 0
+	mr := ctx.GlobalInt(MaxRoundsFlag.Name)
 	for {
-		fmt.Printf("\n\nROUND %d\n", round)
-
-		var execFunc func() ([]byte, uint64, error)
-		if receiver == nil || ctx.GlobalBool(CreateFlag.Name) {
-			input = append(code, input...)
-			execFunc = func() ([]byte, uint64, error) {
-				output, _, gasLeft, err := runtime.Create(input, runtimeConfig)
-				return output, gasLeft, err
-			}
+		if creating {
+			runtime.Create(data, runtimeConfig)
 		} else {
-			if len(code) > 0 {
-				runtimeConfig.State.SetCode(*receiver, code)
-			}
-			execFunc = func() ([]byte, uint64, error) {
-				return runtime.Call(*receiver, input, runtimeConfig)
-			}
+			runtime.Call(*receiver, data, runtimeConfig)
 		}
-
-		bench := ctx.GlobalBool(BenchFlag.Name)
-		_, _, stats, _ := timedExec(bench, execFunc)
-
-		if bench {
-			fmt.Fprintf(os.Stdout, "execution time: %v\n allocations: %d\n allocated bytes: %d",
-				stats.time, stats.allocs, stats.bytesAllocated)
-		}
-
-		newAccounts := tracer.GetNewAccounts()
-		newSlots := tracer.GetNewStorageSlots()
-
-		slotCount := newSlots.StorageKeys()
-		totalAccountNum += len(newAccounts)
-		totalSlotNum += slotCount
-
-		batch := len(newAccounts) + slotCount
-		batches = append(batches, batch)
-
-		printNewStateAccess(newAccounts, newSlots)
 		round++
-		if !tracer.HasMore || mr > 0 && round >= mr || tracer.HasMore && batch == 0 {
+
+		roundResult := TxRoundRecord{
+			A: tracer.GetNewAccounts(),
+			S: tracer.GetNewStorageSlots(),
+		}
+		accountNum := len(roundResult.A)
+		slotNum := roundResult.S.StorageKeys()
+
+		txResult.Ta = txResult.Ta + accountNum
+		txResult.Ts = txResult.Ts + slotNum
+		txResult.Rd = append(txResult.Rd, roundResult)
+
+		if runtimeConfig.Fetcher == nil || accountNum == 0 && slotNum == 0 || mr > 0 && round >= mr {
 			break
 		}
 
 		// Fetch new access list
+		batch := accountNum + slotNum
 		accountsToFetch := make([]*common.Address, 0, batch)
 		keysToFetch := make([]*common.Hash, 0, batch)
-		for _, account := range newAccounts {
+		for _, account := range roundResult.A {
 			accountsToFetch = append(accountsToFetch, &account)
 			keysToFetch = append(keysToFetch, nil)
 		}
-		for _, tuple := range newSlots {
+		for _, tuple := range roundResult.S {
 			for _, slot := range tuple.StorageKeys {
 				accountsToFetch = append(accountsToFetch, &tuple.Address)
 				keysToFetch = append(keysToFetch, &slot)
@@ -508,53 +583,94 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Addre
 		runtimeConfig.Fetcher.Fetch(accountsToFetch, keysToFetch)
 		runtimeConfig.State = runtimeConfig.Fetcher.CopyStatedb()
 		tracer.AppendListToKnownList()
+		tracer.Touches = 0
+		//tracer.HasMore = false
 	}
 
-	// Summary
-	fmt.Printf("\n\nSummary\n")
-	fmt.Printf("\tTotal rounds:         %d\n", round)
-	fmt.Printf("\tTotal accounts:       %d\n", totalAccountNum)
-	fmt.Printf("\tTotal storage slots:  %d\n", totalSlotNum)
-	fmt.Printf("\tRetrieval batches:    %v\n", batches)
+	txResult.Tr = round
+	txResult.Tt = tracer.Touches
 
-	return nil
+	return txResult, nil
 }
 
-func printNewStateAccess(accounts []common.Address, slots types.AccessList) {
-
-	fmt.Printf("\tNew state access\n")
-
-	fmt.Printf("\t\tAccounts:\n")
-	if len(accounts) > 0 {
-		for _, account := range accounts {
-			fmt.Printf("\t\t\t%v\n", account)
+// Write to console with a more readable format
+func printResults(results []*TxPredictResult) {
+	for idx, result := range results {
+		if len(result.H) > 0 {
+			fmt.Printf("\nTX %d:\t%v\n", idx, result.H)
+		} else {
+			fmt.Printf("\nTX %d\n", idx)
 		}
-	}
-
-	fmt.Printf("\t\tStorage slots:\n")
-	if len(slots) > 0 {
-		for _, tuple := range slots {
-			fmt.Printf("\t\t\t%v\n", tuple.Address)
-			for _, slot := range tuple.StorageKeys {
-				fmt.Printf("\t\t\t\t%v\n", slot.Hex())
+		batches := make([]int, 0, len(result.Rd))
+		for idx2, round := range result.Rd {
+			fmt.Printf("\nRound %d\n", idx2)
+			batch := 0
+			if len(round.A) > 0 {
+				fmt.Printf("Accounts:\n")
+				for _, account := range round.A {
+					fmt.Printf("\t%v\n", account)
+				}
+				batch += len(round.A)
 			}
+
+			if len(round.S) > 0 {
+				fmt.Printf("Slots:\n")
+				for _, tuple := range round.S {
+					fmt.Printf("\t%v\n", tuple.Address)
+					for _, slot := range tuple.StorageKeys {
+						fmt.Printf("\t\t%v\n", slot.Hex())
+					}
+					batch += len(tuple.StorageKeys)
+				}
+			}
+			batches = append(batches, batch)
+		}
+		// Summary
+		fmt.Printf("\nSummary\n")
+		fmt.Printf("Total rounds:         %d\n", result.Tr)
+		fmt.Printf("Total touches:        %d\n", result.Tt)
+		fmt.Printf("Total accounts:       %d\n", result.Ta)
+		fmt.Printf("Total storage slots:  %d\n", result.Ts)
+		fmt.Printf("Retrieval batches:    %v\n", batches)
+	}
+
+}
+
+func outputResults(filename string, results []*TxPredictResult) error {
+	if len(results) > 0 {
+		if len(filename) > 0 {
+			// Dump to file as json format
+			outputFile, outputError := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE, 0666)
+			if outputError != nil {
+				return outputError
+			}
+			defer outputFile.Close()
+
+			writer := bufio.NewWriter(outputFile)
+			encoder := json.NewEncoder(writer)
+			encoder.Encode(results)
+			defer writer.Flush()
+		} else {
+			printResults(results)
 		}
 	}
+	return nil
 }
 
 func init() {
 	app.Flags = []cli.Flag{
 		RpcFlag,
+		OutFlag,
 		TxHashFlag,
-		BenchFlag,
+		BlockFlag,
 		CreateFlag,
 		VerbosityFlag,
 		CodeFlag,
 		CodeFileFlag,
 		ValueFlag,
-		InputFlag,
-		SenderFlag,
-		ReceiverFlag,
+		DataFlag,
+		FromFlag,
+		ToFlag,
 		MaxProcsFlag,
 		MaxRoundsFlag,
 		DebugFlag,
