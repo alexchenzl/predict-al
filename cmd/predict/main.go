@@ -221,7 +221,11 @@ func runCmd(ctx *cli.Context) error {
 			var results []*TxPredictResult
 			results, err = runHistoryBlock(ctx, rpc, rpcClient, big.NewInt(block))
 			if err == nil {
-				outputResults(fmt.Sprintf("%v-%d", ctx.GlobalString(OutFlag.Name), block), results)
+				filename := ctx.GlobalString(OutFlag.Name)
+				if len(filename) > 0 {
+					filename = fmt.Sprintf("%v-%d", ctx.GlobalString(OutFlag.Name), block)
+				}
+				outputResults(filename, results)
 				return nil
 			}
 		} else {
@@ -429,7 +433,7 @@ func runHistoryBlock(ctx *cli.Context, rpc string, rpcClient *fakestate.RpcClien
 				res, err := runPredictTxTask(ctx, rpc, runtimeConfig, &from, msg.To(), msg.Value(), msg.GasPrice(), msg.Data(), nil)
 				if err != nil {
 					results[task.index] = &TxPredictResult{H: tx.Hash().Hex(), E: err.Error()}
-				} else {
+				} else if res != nil {
 					res.H = tx.Hash().Hex()
 					results[task.index] = res
 				}
@@ -506,10 +510,6 @@ func runPredictTxTask(ctx *cli.Context, rpc string, runtimeConfig *runtime.Confi
 
 func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Address, receiver *common.Address, code []byte, data []byte) (*TxPredictResult, error) {
 
-	//totalAccountNum := 0
-	//totalSlotNum := 0
-	//batches := make([]int, 0, 1)
-
 	logconfig := &vm.LogConfig{
 		EnableMemory:     !ctx.GlobalBoolT(DisableMemoryFlag.Name),
 		DisableStack:     ctx.GlobalBoolT(DisableStackFlag.Name),
@@ -523,20 +523,24 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Addre
 		Debug:  true,
 	}
 
-	creating := false
-	if receiver == nil || ctx.GlobalBool(CreateFlag.Name) {
-		data = append(code, data...)
-		creating = true
-	} else if len(code) > 0 {
-		runtimeConfig.State.SetCode(*receiver, code)
-	}
-
 	txResult := &TxPredictResult{
 		Rd: make([]TxRoundRecord, 1, 2),
 	}
 	// Initial state accesses
 	txResult.Rd[0] = TxRoundRecord{
 		A: tracer.GetKnowAccounts(),
+	}
+	txResult.Ta = len(txResult.Rd[0].A)
+
+	creating := false
+	if (receiver == nil || ctx.GlobalBool(CreateFlag.Name)) && data != nil {
+		data = append(code, data...)
+		creating = true
+	} else if len(code) > 0 {
+		runtimeConfig.State.SetCode(*receiver, code)
+	} else {
+		// simple transfer
+		return txResult, nil
 	}
 
 	round := 0
@@ -596,6 +600,9 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Addre
 // Write to console with a more readable format
 func printResults(results []*TxPredictResult) {
 	for idx, result := range results {
+		if result == nil {
+			continue
+		}
 		if len(result.H) > 0 {
 			fmt.Printf("\nTX %d:\t%v\n", idx, result.H)
 		} else {
