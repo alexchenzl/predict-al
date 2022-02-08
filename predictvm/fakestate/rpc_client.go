@@ -147,8 +147,8 @@ func (ec *RpcClient) GetAccountsAt(ctx context.Context, accounts []common.Addres
 		for i := range accounts {
 			idx := i * 3
 			for j := 0; j < 3; j++ {
-				if reqs[idx].Error != nil {
-					return nil, reqs[idx].Error
+				if reqs[idx+j].Error != nil {
+					return nil, reqs[idx+j].Error
 				}
 			}
 			results[i].Address = accounts[i]
@@ -167,19 +167,19 @@ func (ec *RpcClient) GetAccountsAt(ctx context.Context, accounts []common.Addres
 	return nil, nil
 }
 
-// GetStoragesAt get all storages in a batch call
-func (ec *RpcClient) GetStoragesAt(ctx context.Context, accounts []common.Address, keys []common.Hash, blockNumber *big.Int) ([]StorageResult, error) {
+// GetStoragesAt get all storage slots in a batch call
+func (ec *RpcClient) GetStoragesAt(ctx context.Context, contracts []common.Address, keys []common.Hash, blockNumber *big.Int) ([]StorageResult, error) {
 
-	if len(accounts) > 0 {
-		if len(keys) != len(accounts) {
+	if len(contracts) > 0 {
+		if len(keys) != len(contracts) {
 			return nil, errors.New("invalid parameters")
 		}
 
-		reqs := make([]rpc.BatchElem, len(accounts))
-		for i := range accounts {
+		reqs := make([]rpc.BatchElem, len(contracts))
+		for i := range contracts {
 			reqs[i] = rpc.BatchElem{
 				Method: "eth_getStorageAt",
-				Args:   []interface{}{accounts[i], keys[i], toBlockNumArg(blockNumber)},
+				Args:   []interface{}{contracts[i], keys[i], toBlockNumArg(blockNumber)},
 				Result: new(hexutil.Bytes),
 			}
 		}
@@ -188,13 +188,13 @@ func (ec *RpcClient) GetStoragesAt(ctx context.Context, accounts []common.Addres
 			return nil, err
 		}
 
-		results := make([]StorageResult, len(accounts))
+		results := make([]StorageResult, len(contracts))
 
-		for i := range accounts {
+		for i := range contracts {
 			if reqs[i].Error != nil {
 				return nil, reqs[i].Error
 			}
-			results[i].Address = accounts[i]
+			results[i].Address = contracts[i]
 			results[i].Key = keys[i]
 			// Even if a storage key doesn't occur in a contract, this API will return an all-zero byte array instead of nil
 			results[i].Value = *(reqs[i].Result.(*hexutil.Bytes))
@@ -202,6 +202,72 @@ func (ec *RpcClient) GetStoragesAt(ctx context.Context, accounts []common.Addres
 		return results, nil
 	}
 
+	return nil, nil
+}
+
+// GetStatesAt get all contracts' storage slots and accounts states in a batch call
+func (ec *RpcClient) GetStatesAt(ctx context.Context, contracts []common.Address, keys []common.Hash, accounts []common.Address, blockNumber *big.Int) ([]interface{}, error) {
+
+	if len(contracts) > 0 || len(accounts) > 0 {
+		if len(keys) != len(contracts) {
+			return nil, errors.New("invalid parameters")
+		}
+
+		reqs := make([]rpc.BatchElem, len(contracts)+len(accounts)*3)
+		blockNumberArg := toBlockNumArg(blockNumber)
+		// request slots
+		for i := range contracts {
+			reqs[i] = rpc.BatchElem{
+				Method: "eth_getStorageAt",
+				Args:   []interface{}{contracts[i], keys[i], blockNumberArg},
+				Result: new(hexutil.Bytes),
+			}
+		}
+		// request accounts
+		start := len(contracts)
+		for i := range accounts {
+			idx := start + i*3
+			buildAccountReq(reqs[idx:idx+3], &accounts[i], blockNumberArg)
+		}
+		if err := ec.c.BatchCallContext(ctx, reqs); err != nil {
+			return nil, err
+		}
+
+		results := make([]interface{}, len(contracts)+len(accounts))
+		for i := range contracts {
+			if reqs[i].Error != nil {
+				return nil, reqs[i].Error
+			}
+			result := &StorageResult{
+				Address: contracts[i],
+				Key:     keys[i],
+				Value:   *(reqs[i].Result.(*hexutil.Bytes)),
+			}
+			results[i] = result
+		}
+
+		for i := range accounts {
+			idx := start + i*3
+			for j := 0; j < 3; j++ {
+				if reqs[idx+j].Error != nil {
+					return nil, reqs[idx+j].Error
+				}
+			}
+			result := &AccountResult{
+				Address: accounts[i],
+				Balance: (*big.Int)(reqs[idx].Result.(*hexutil.Big)),
+				Nonce:   *(*uint64)(reqs[idx+1].Result.(*hexutil.Uint64)),
+			}
+			code := *(reqs[idx+2].Result.(*hexutil.Bytes))
+			if len(code) == 0 {
+				result.Code = nil
+			} else {
+				result.Code = code
+			}
+			results[start+i] = result
+		}
+		return results, nil
+	}
 	return nil, nil
 }
 

@@ -489,9 +489,13 @@ func parseCode(ctx *cli.Context) []byte {
 
 func runPredictTxTask(ctx *cli.Context, rpc string, runtimeConfig *runtime.Config, from, to *common.Address, value, gasPrice *big.Int, data, code []byte) (*TxPredictResult, error) {
 	stateDB := fakestate.NewStateDB()
+	rpcClient, err := fakestate.DialContext(context.Background(), rpc)
+	if err != nil {
+		return nil, err
+	}
+	defer rpcClient.Close()
 	// states need to be fetched from parent block
-	fetcher := fakestate.NewStateFetcher(stateDB, rpc, big.NewInt(runtimeConfig.BlockNumber.Int64()-1), ctx.GlobalInt(MaxProcsFlag.Name))
-	defer fetcher.Close()
+	fetcher := fakestate.NewStateFetcher(stateDB, rpcClient, big.NewInt(runtimeConfig.BlockNumber.Int64()-1))
 
 	// fetch initial states from and to accounts
 	fetcher.FetchFromAndTo(from, to)
@@ -569,22 +573,32 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Addre
 		}
 
 		// Fetch new access list
-		batch := accountNum + slotNum
-		accountsToFetch := make([]*common.Address, 0, batch)
-		keysToFetch := make([]*common.Hash, 0, batch)
-		for _, account := range roundResult.A {
-			accountsToFetch = append(accountsToFetch, &account)
-			keysToFetch = append(keysToFetch, nil)
+		var (
+			accountsToFetch      []common.Address
+			slotContractsToFetch []common.Address
+			slotKeysToFetch      []common.Hash
+		)
+
+		if accountNum > 0 {
+			accountsToFetch = make([]common.Address, 0, accountNum)
+			for _, account := range roundResult.A {
+				accountsToFetch = append(accountsToFetch, account)
+			}
 		}
-		for _, tuple := range roundResult.S {
-			for _, slot := range tuple.StorageKeys {
-				accountsToFetch = append(accountsToFetch, &tuple.Address)
-				keysToFetch = append(keysToFetch, &slot)
+
+		if slotNum > 0 {
+			slotContractsToFetch = make([]common.Address, 0, slotNum)
+			slotKeysToFetch = make([]common.Hash, 0, slotNum)
+			for _, tuple := range roundResult.S {
+				for _, key := range tuple.StorageKeys {
+					slotContractsToFetch = append(slotContractsToFetch, tuple.Address)
+					slotKeysToFetch = append(slotKeysToFetch, key)
+				}
 			}
 		}
 
 		// Prepare for next round
-		runtimeConfig.Fetcher.Fetch(accountsToFetch, keysToFetch)
+		runtimeConfig.Fetcher.Fetch(slotContractsToFetch, slotKeysToFetch, accountsToFetch)
 		runtimeConfig.State = runtimeConfig.Fetcher.CopyStatedb()
 		tracer.AppendListToKnownList()
 		tracer.Touches = 0
