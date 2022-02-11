@@ -230,7 +230,7 @@ func runCmd(ctx *cli.Context) error {
 			if err == nil {
 				filename := ctx.GlobalString(OutFlag.Name)
 				if len(filename) > 0 {
-					filename = fmt.Sprintf("%v-%d", ctx.GlobalString(OutFlag.Name), block)
+					filename = fmt.Sprintf("%v-%d.json", ctx.GlobalString(OutFlag.Name), block)
 				}
 				outputResults(filename, results)
 				return nil

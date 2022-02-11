@@ -739,22 +739,20 @@ func opJump(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byt
 func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	pos, cond := scope.Stack.pop(), scope.Stack.pop()
 
-	if !scope.Contract.validJumpdest(&pos) {
-		return nil, ErrInvalidJump
-	}
-
 	jump := scope.Jumps[*pc]
 	jump++
 	scope.Jumps[*pc] = jump
-
 	// Avoid too many loops
-	// FIXME this is a magic number, could be configurable
+	// FIXME this is a magic number, should be configurable
 	if jump > 1024 {
 		return nil, ErrJumpiTooManyLoops
 	}
 
 	if !cond.Eq(UnknownValuePlaceHolder) {
 		if !cond.IsZero() {
+			if !scope.Contract.validJumpdest(&pos) {
+				return nil, ErrInvalidJump
+			}
 			*pc = pos.Uint64()
 		} else {
 			*pc++
@@ -771,6 +769,9 @@ func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]by
 			interpreter.RunBranch(*pc+1, scope)
 		}
 
+		if !scope.Contract.validJumpdest(&pos) {
+			return nil, ErrInvalidJump
+		}
 		*pc = pos.Uint64()
 	}
 	return nil, nil
