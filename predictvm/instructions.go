@@ -743,9 +743,9 @@ func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]by
 		return nil, ErrInvalidJump
 	}
 
-	jump := scope.Jumpis[*pc]
+	jump := scope.Jumps[*pc]
 	jump++
-	scope.Jumpis[*pc] = jump
+	scope.Jumps[*pc] = jump
 
 	// Avoid too many loops
 	// FIXME this is a magic number, could be configurable
@@ -768,7 +768,7 @@ func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]by
 		// If cond is not known, need to follow both branches
 		// But if branch depth is too big, only follow non-zero branch
 		if interpreter.evm.branchDepth < RunBranchDepth {
-			interpreter.RunBranch(*pc + 1)
+			interpreter.RunBranch(*pc+1, scope)
 		}
 
 		*pc = pos.Uint64()
