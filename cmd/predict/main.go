@@ -58,6 +58,19 @@ var (
 		Usage: "Height of the history block within which all transactions contained will be executed. If tx is provided, block would be ignored",
 		Value: -1,
 	}
+
+	BatchFlag = cli.IntFlag{
+		Name:  "batch",
+		Usage: "number of transactions that will be run concurrently in a batch, default is 32",
+		Value: 32,
+	}
+
+	TimeoutFlag = cli.IntFlag{
+		Name:  "timeout",
+		Usage: "maximum seconds to run a transaction, default is 5",
+		Value: 5,
+	}
+
 	CodeFlag = cli.StringFlag{
 		Name:  "code",
 		Usage: "Raw EVM code",
@@ -103,11 +116,11 @@ var (
 	}
 	DebugFlag = cli.BoolFlag{
 		Name:  "debug",
-		Usage: "Output full evm execution trace logs if this flag is set",
+		Usage: "Output full evm execution logs if this flag is set",
 	}
 	DisableMemoryFlag = cli.BoolTFlag{
 		Name:  "nomemory",
-		Usage: "disable memory output, default true",
+		Usage: "disable memory output in full evm execution logs, default true",
 	}
 	DisableStackFlag = cli.BoolTFlag{
 		Name:  "nostack",
@@ -207,19 +220,13 @@ func runCmd(ctx *cli.Context) error {
 	var result *TxPredictResult
 	rpc := ctx.GlobalString(RpcFlag.Name)
 	if rpc != "" {
-		rpcClient, err := fakestate.DialContext(context.Background(), rpc)
-		if err != nil {
-			return err
-		}
-		defer rpcClient.Close()
-
 		txHash := ctx.GlobalString(TxHashFlag.Name)
 		block := ctx.GlobalInt64(BlockFlag.Name)
 		if txHash != "" {
-			result, err = runHistoryTransaction(ctx, rpc, rpcClient, txHash)
+			result, err = runHistoryTransaction(ctx, rpc, txHash)
 		} else if block >= 0 {
 			var results []*TxPredictResult
-			results, err = runHistoryBlock(ctx, rpc, rpcClient, big.NewInt(block))
+			results, err = runHistoryBlock(ctx, rpc, big.NewInt(block))
 			if err == nil {
 				filename := ctx.GlobalString(OutFlag.Name)
 				if len(filename) > 0 {
@@ -229,7 +236,7 @@ func runCmd(ctx *cli.Context) error {
 				return nil
 			}
 		} else {
-			result, err = runNewTransaction(ctx, rpc, rpcClient)
+			result, err = runNewTransaction(ctx, rpc)
 		}
 	} else {
 		result, err = runRawCodeLocally(ctx)
@@ -281,14 +288,20 @@ func runRawCodeLocally(ctx *cli.Context) (*TxPredictResult, error) {
 	if code == nil {
 		cli.ShowAppHelpAndExit(ctx, 1)
 	}
-	return runTx(ctx, &runtimeConfig, &from, &to, code, input)
+	return runTx(ctx, &runtimeConfig, "", &from, &to, code, input)
 }
 
 // runHistoryTransaction execute history transaction based on its parent block states
 // If it's a pending transaction, use the latest block header to create runtime configuration
-func runHistoryTransaction(ctx *cli.Context, rpc string, rpcClient *fakestate.RpcClient, txHash string) (*TxPredictResult, error) {
+func runHistoryTransaction(ctx *cli.Context, rpc string, txHash string) (*TxPredictResult, error) {
 
 	rpcCtx := context.Background()
+	rpcClient, err := fakestate.DialContext(context.Background(), rpc)
+	if err != nil {
+		return nil, err
+	}
+	defer rpcClient.Close()
+
 	// If txHash is provided, execute the history transaction, but it is also may be a pending tx
 	tx, pending, err := rpcClient.GetTransactionByHash(rpcCtx, common.HexToHash(txHash))
 	if err != nil {
@@ -329,16 +342,17 @@ func runHistoryTransaction(ctx *cli.Context, rpc string, rpcClient *fakestate.Rp
 	runtimeConfig := newRuntimeConfig(header, chainConfig, big.NewInt(txTime), txBlockNum)
 	runtimeConfig.GetHashFn = bhCache.GetHashFn
 
-	result, err := runPredictTxTask(ctx, rpc, runtimeConfig, tx.From, tx.Tx.To(), tx.Tx.Value(), tx.Tx.GasPrice(), tx.Tx.Data(), nil)
+	hash := tx.Tx.Hash().Hex()
+	result, err := runPredictTxTask(ctx, rpcClient, runtimeConfig, hash, tx.From, tx.Tx.To(), tx.Tx.Value(), tx.Tx.GasPrice(), tx.Tx.Data(), nil)
 	if err == nil {
-		result.H = tx.Tx.Hash().Hex()
+		result.H = hash
 	}
 	return result, err
 }
 
 // runNewTransaction execute a new transaction, runtime configuration is created from the latest block header
 // if code is provided, the code in fetched state will be overridden. Sender must be provided.
-func runNewTransaction(ctx *cli.Context, rpc string, rpcClient *fakestate.RpcClient) (*TxPredictResult, error) {
+func runNewTransaction(ctx *cli.Context, rpc string) (*TxPredictResult, error) {
 	var (
 		from *common.Address
 		to   *common.Address
@@ -358,6 +372,12 @@ func runNewTransaction(ctx *cli.Context, rpc string, rpcClient *fakestate.RpcCli
 	}
 
 	rpcCtx := context.Background()
+	rpcClient, err := fakestate.DialContext(context.Background(), rpc)
+	if err != nil {
+		return nil, err
+	}
+	defer rpcClient.Close()
+
 	// Get current block header to generate runtime runtimeConfig
 	header, err := rpcClient.GetBlockHeader(rpcCtx, nil)
 	if err != nil {
@@ -378,26 +398,86 @@ func runNewTransaction(ctx *cli.Context, rpc string, rpcClient *fakestate.RpcCli
 	hexInput := []byte(ctx.GlobalString(DataFlag.Name))
 	input := common.FromHex(string(bytes.TrimSpace(hexInput)))
 	value := utils.GlobalBig(ctx, ValueFlag.Name)
-	return runPredictTxTask(ctx, rpc, runtimeConfig, from, to, value, new(big.Int), input, code)
+	return runPredictTxTask(ctx, rpcClient, runtimeConfig, "", from, to, value, new(big.Int), input, code)
+}
+
+func runBatch(ctx *cli.Context, rpc string, chainConfig *params.ChainConfig, bhCache *fakestate.BlockHashCache, block *types.Block, txs []*types.Transaction) ([]*TxPredictResult, error) {
+	var (
+		signer  = types.MakeSigner(chainConfig, block.Number())
+		results = make([]*TxPredictResult, len(txs))
+		pend    = new(sync.WaitGroup)
+		jobs    = make(chan *txPredictTask, 8)
+	)
+
+	threads := goruntime.NumCPU()
+	if threads > len(txs) {
+		threads = len(txs)
+	}
+	for th := 0; th < threads; th++ {
+		pend.Add(1)
+		go func() {
+			defer pend.Done()
+
+			rpcClient, err := fakestate.DialContext(context.Background(), rpc)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error occured in runBatch: %v", err.Error())
+				return
+			}
+			defer rpcClient.Close()
+
+			for task := range jobs {
+				runtimeConfig := newRuntimeConfig(block.Header(), chainConfig, big.NewInt(int64(block.Time())), block.Number())
+				runtimeConfig.GetHashFn = bhCache.GetHashFn
+
+				tx := task.tx
+				msg, _ := tx.AsMessage(signer, block.BaseFee())
+				from := msg.From()
+				hash := tx.Hash().Hex()
+
+				res, err := runPredictTxTask(ctx, rpcClient, runtimeConfig, hash, &from, msg.To(), msg.Value(), msg.GasPrice(), msg.Data(), nil)
+				if err != nil {
+					results[task.index] = &TxPredictResult{H: hash, E: err.Error()}
+					fmt.Fprintf(os.Stderr, "task %v: %v", hash, err)
+				} else if res != nil {
+					res.H = hash
+					results[task.index] = res
+				}
+			}
+		}()
+	}
+
+	for i, tx := range txs {
+		jobs <- &txPredictTask{tx: tx, index: i}
+	}
+	close(jobs)
+	pend.Wait()
+	return results, nil
 }
 
 // runHistoryBlock execute all transactions in this block concurrently based on its parent block states. Because this
-// is not an archive full node, it can not generate exact pre-states before executing a transaction in this block like
-// a tracer.
-func runHistoryBlock(ctx *cli.Context, rpc string, rpcClient *fakestate.RpcClient, blockNum *big.Int) ([]*TxPredictResult, error) {
+// tool is not an archive node, it can not generate exact pre-states before executing any transaction in this block
+// like running a tracer on an archive node.
+func runHistoryBlock(ctx *cli.Context, rpc string, blockNum *big.Int) ([]*TxPredictResult, error) {
 
 	if blockNum != nil && blockNum.Sign() == 0 {
 		return nil, errors.New("genesis is not predictable")
 	}
 
 	rpcCtx := context.Background()
+	rpcClient, err := fakestate.DialContext(context.Background(), rpc)
+	if err != nil {
+		return nil, err
+	}
+	defer rpcClient.Close()
+
 	block, err := rpcClient.GetBlock(rpcCtx, blockNum)
 	if err != nil {
 		return nil, err
 	}
 
 	txs := block.Transactions()
-	if len(txs) == 0 {
+	txNum := len(txs)
+	if txNum == 0 {
 		return nil, nil
 	}
 
@@ -407,46 +487,24 @@ func runHistoryBlock(ctx *cli.Context, rpc string, rpcClient *fakestate.RpcClien
 	bhCache := fakestate.NewBlockHashCache(hashmap)
 
 	// Execute all the transaction contained within the block concurrently
-	var (
-		signer  = types.MakeSigner(chainConfig, block.Number())
-		results = make([]*TxPredictResult, len(txs))
+	results := make([]*TxPredictResult, 0, txNum)
 
-		pend = new(sync.WaitGroup)
-		jobs = make(chan *txPredictTask, len(txs))
-	)
-	threads := goruntime.NumCPU()
-	if threads > len(txs) {
-		threads = len(txs)
+	batch := ctx.GlobalInt(BatchFlag.Name)
+	batchNum := txNum / batch
+
+	pos := 0
+	for i := 0; i < batchNum; i++ {
+		fmt.Fprintf(os.Stdout, "Block %v batch %d\n", block.Number().Int64(), i)
+		pos = batch * i
+		batchResult, _ := runBatch(ctx, rpc, chainConfig, bhCache, block, txs[pos:pos+batch])
+		results = append(results, batchResult...)
 	}
-
-	for th := 0; th < threads; th++ {
-		pend.Add(1)
-		go func() {
-			defer pend.Done()
-			for task := range jobs {
-				runtimeConfig := newRuntimeConfig(block.Header(), chainConfig, big.NewInt(int64(block.Time())), block.Number())
-				runtimeConfig.GetHashFn = bhCache.GetHashFn
-
-				tx := task.tx
-				msg, _ := tx.AsMessage(signer, block.BaseFee())
-				from := msg.From()
-				res, err := runPredictTxTask(ctx, rpc, runtimeConfig, &from, msg.To(), msg.Value(), msg.GasPrice(), msg.Data(), nil)
-				if err != nil {
-					results[task.index] = &TxPredictResult{H: tx.Hash().Hex(), E: err.Error()}
-				} else if res != nil {
-					res.H = tx.Hash().Hex()
-					results[task.index] = res
-				}
-			}
-		}()
+	pos = batch * batchNum
+	if pos < txNum {
+		fmt.Fprintf(os.Stdout, "Block %v last batch\n", block.Number().Int64())
+		batchResult, _ := runBatch(ctx, rpc, chainConfig, bhCache, block, txs[pos:])
+		results = append(results, batchResult...)
 	}
-
-	for i, tx := range txs {
-
-		jobs <- &txPredictTask{tx: tx, index: i}
-	}
-	close(jobs)
-	pend.Wait()
 	return results, err
 }
 
@@ -487,13 +545,8 @@ func parseCode(ctx *cli.Context) []byte {
 	return nil
 }
 
-func runPredictTxTask(ctx *cli.Context, rpc string, runtimeConfig *runtime.Config, from, to *common.Address, value, gasPrice *big.Int, data, code []byte) (*TxPredictResult, error) {
+func runPredictTxTask(ctx *cli.Context, rpcClient *fakestate.RpcClient, runtimeConfig *runtime.Config, hash string, from, to *common.Address, value, gasPrice *big.Int, data, code []byte) (*TxPredictResult, error) {
 	stateDB := fakestate.NewStateDB()
-	rpcClient, err := fakestate.DialContext(context.Background(), rpc)
-	if err != nil {
-		return nil, err
-	}
-	defer rpcClient.Close()
 	// states need to be fetched from parent block
 	fetcher := fakestate.NewStateFetcher(stateDB, rpcClient, big.NewInt(runtimeConfig.BlockNumber.Int64()-1))
 
@@ -509,22 +562,23 @@ func runPredictTxTask(ctx *cli.Context, rpc string, runtimeConfig *runtime.Confi
 	runtimeConfig.Origin = *from
 	runtimeConfig.GasPrice = gasPrice
 	runtimeConfig.Value = value
-	return runTx(ctx, runtimeConfig, from, to, code, data)
+	return runTx(ctx, runtimeConfig, hash, from, to, code, data)
 }
 
-func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Address, receiver *common.Address, code []byte, data []byte) (*TxPredictResult, error) {
+func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender *common.Address, receiver *common.Address, code []byte, data []byte) (*TxPredictResult, error) {
 
-	logconfig := &vm.LogConfig{
+	logConfig := &vm.LogConfig{
 		EnableMemory:     !ctx.GlobalBoolT(DisableMemoryFlag.Name),
 		DisableStack:     ctx.GlobalBoolT(DisableStackFlag.Name),
 		DisableStorage:   ctx.GlobalBoolT(DisableStorageFlag.Name),
 		EnableReturnData: !ctx.GlobalBoolT(DisableReturnDataFlag.Name),
 		Debug:            ctx.GlobalBool(DebugFlag.Name),
 	}
-	tracer := vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin, logconfig)
+	tracer := vm.NewAccessListTracer(nil, sender, receiver, vm.PrecompiledAddressesBerlin, logConfig)
 	runtimeConfig.EVMConfig = vm.Config{
 		Tracer: tracer,
-		Debug:  true,
+		// always true because we use tracer to record access list
+		Debug: true,
 	}
 
 	txResult := &TxPredictResult{
@@ -546,6 +600,18 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, sender *common.Addre
 		// simple transfer
 		return txResult, nil
 	}
+
+	// Handle timeouts
+	timeout := time.Duration(ctx.GlobalInt(TimeoutFlag.Name)) * time.Second
+	deadlineCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	go func() {
+		<-deadlineCtx.Done()
+		if deadlineCtx.Err() == context.DeadlineExceeded {
+			fmt.Fprintf(os.Stderr, "execution timeout %v\n", hash)
+			tracer.Stop(errors.New("execution timeout " + hash))
+		}
+	}()
+	defer cancel()
 
 	round := 0
 	mr := ctx.GlobalInt(MaxRoundsFlag.Name)
@@ -684,6 +750,8 @@ func init() {
 		OutFlag,
 		TxHashFlag,
 		BlockFlag,
+		BatchFlag,
+		TimeoutFlag,
 		CreateFlag,
 		VerbosityFlag,
 		CodeFlag,

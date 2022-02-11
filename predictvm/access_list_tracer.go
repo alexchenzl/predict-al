@@ -19,6 +19,7 @@ package predictvm
 import (
 	"math/big"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -128,6 +129,9 @@ type AccessListTracer struct {
 	Touches   int                         // Total state access times
 	HasMore   bool                        // Whether there's more unknown states in this round
 	logger    *StructLogger               // Detailed debug information logger
+
+	interrupt uint32 // Atomic flag to signal execution interruption
+	reason    error  // Textual reason for the interruption
 }
 
 // NewAccessListTracer creates a new tracer that can generate AccessLists.
@@ -219,11 +223,23 @@ func (a *AccessListTracer) GetNewStorageSlots() types.AccessList {
 	return acl
 }
 
+func (a *AccessListTracer) Stop(err error) {
+	a.reason = err
+	atomic.StoreUint32(&a.interrupt, 1)
+}
 func (a *AccessListTracer) CaptureStart(env *EVM, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
 }
 
 // CaptureState captures all opcodes that touch storage or addresses and adds them to the accesslist.
 func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, rData []byte, depth int, err error) {
+	if atomic.LoadUint32(&a.interrupt) > 0 {
+		if a.logger != nil {
+			a.logger.CaptureState(env, pc, op, gas, cost, scope, rData, depth, a.reason)
+			a.logger.WriteLastTrace(os.Stdout, "")
+		}
+		return
+	}
+
 	if a.logger != nil {
 		a.logger.CaptureState(env, pc, op, gas, cost, scope, rData, depth, err)
 		a.logger.WriteLastTrace(os.Stdout, "")
@@ -293,7 +309,7 @@ func (a *AccessListTracer) CaptureEnd(output []byte, gasUsed uint64, t time.Dura
 	}
 }
 
-func (*AccessListTracer) CaptureEnter(typ OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
+func (a *AccessListTracer) CaptureEnter(typ OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
 }
 
 func (*AccessListTracer) CaptureExit(output []byte, gasUsed uint64, err error) {}
