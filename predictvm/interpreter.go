@@ -26,7 +26,7 @@ import (
 	"predict_acl/predictvm/fakestate"
 )
 
-// RunBranchDepth Maximum depth of RunBranch stack. If the depth is n, there will be 2^n branches
+// RunBranchDepth Maximum depth of RunBranch stack, to avoid branch explosion
 const RunBranchDepth int = 8
 
 // Config are the configuration options for the Interpreter
@@ -48,8 +48,13 @@ type ScopeContext struct {
 	Memory   *Memory
 	Stack    *Stack
 	Contract *Contract
-	// record the execution count of jumpi opcodes
+
+	// record the execution count of normal jumpi opcodes
 	Jumps map[uint64]int
+	// record the execution count of jumpi opcodes with fake condition values
+	Jumps2 map[uint64]int
+
+	Steps uint64
 }
 
 // keccakState wraps sha3.state. In addition to the usual hash methods, it also supports
@@ -147,11 +152,14 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 		mem         = NewMemory() // bound memory
 		stack       = newstack()  // local stack
 		jumps       = make(map[uint64]int)
+		jumps2      = make(map[uint64]int)
 		callContext = &ScopeContext{
 			Memory:   mem,
 			Stack:    stack,
 			Contract: contract,
-			Jumps:    jumps,
+
+			Jumps:  jumps,
+			Jumps2: jumps2,
 		}
 		// For optimisation reason we're using uint64 as the program counter.
 		// It's theoretically possible to go above 2^64. The YP defines the PC
@@ -177,14 +185,20 @@ func (in *EVMInterpreter) RunBranch(pc uint64, callContext *ScopeContext) (ret [
 	defer func() { in.evm.branchDepth-- }()
 
 	var (
-		mem            = NewMemory() // bound memory
-		stack          = newstack()  // local stack
-		jumpis         = make(map[uint64]int)
+		mem    = NewMemory() // bound memory
+		stack  = newstack()  // local stack
+		jumps  = make(map[uint64]int)
+		jumps2 = make(map[uint64]int)
+
 		newCallContext = &ScopeContext{
 			Memory:   mem,
 			Stack:    stack,
 			Contract: callContext.Contract,
-			Jumps:    jumpis,
+
+			Jumps:  jumps,
+			Jumps2: jumps2,
+
+			Steps: callContext.Steps,
 		}
 
 		curReturnData []byte
@@ -205,7 +219,10 @@ func (in *EVMInterpreter) RunBranch(pc uint64, callContext *ScopeContext) (ret [
 
 	// Clone the jumpis
 	for k, v := range callContext.Jumps {
-		jumpis[k] = v
+		jumps[k] = v
+	}
+	for k, v := range callContext.Jumps2 {
+		jumps2[k] = v
 	}
 
 	// snapshot is not implemented yet, so clone the statedb instead
@@ -220,9 +237,12 @@ func (in *EVMInterpreter) RunBranch(pc uint64, callContext *ScopeContext) (ret [
 	}
 
 	defer func() {
+		callContext.Steps = newCallContext.Steps
+
 		if curReturnData != nil {
 			copy(in.returnData, curReturnData)
 		}
+
 		in.evm.StateDB = statedb
 		returnStack(stack)
 	}()
@@ -237,7 +257,7 @@ func (in *EVMInterpreter) runOpCodes(pc uint64, callContext *ScopeContext) (ret 
 		// copies used by tracer
 		pcCopy  uint64 // needed for the deferred Tracer
 		gasCopy uint64 // for Tracer to log gas remaining before execution
-		logged  bool   // deferred Tracer should ignore already logged steps
+		logged  bool   // deferred Tracer should ignore already logged Steps
 		res     []byte // result of the opcode execution function
 	)
 
@@ -257,11 +277,12 @@ func (in *EVMInterpreter) runOpCodes(pc uint64, callContext *ScopeContext) (ret 
 	// explicit STOP, RETURN or SELFDESTRUCT is executed, an error occurred during
 	// the execution of one of the operations or until the done flag is set by the
 	// parent context.
-	steps := 0
 	for {
-		steps++
-		if steps%1000 == 0 && atomic.LoadInt32(&in.evm.abort) != 0 {
-			break
+		callContext.Steps++
+		// return error to avoid running more branches
+		if callContext.Steps%1024 == 0 && atomic.LoadInt32(&in.evm.abort) != 0 {
+			//fmt.Printf("%08x Abort branch %d:%d at step %d\n", pc, in.evm.depth, in.evm.branchDepth, callContext.Steps)
+			return nil, ErrAbort
 		}
 		if in.cfg.Debug {
 			// Capture pre-execution values for tracing.
@@ -275,6 +296,7 @@ func (in *EVMInterpreter) runOpCodes(pc uint64, callContext *ScopeContext) (ret 
 		if operation == nil {
 			return nil, &ErrInvalidOpCode{opcode: op}
 		}
+
 		// Validate stack
 		if sLen := callContext.Stack.len(); sLen < operation.minStack {
 			return nil, &ErrStackUnderflow{stackLen: sLen, required: operation.minStack}

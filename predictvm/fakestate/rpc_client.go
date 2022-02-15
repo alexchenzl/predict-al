@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/core/types"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -432,4 +433,73 @@ func (ec *RpcClient) GetTransactionByHash(ctx context.Context, hash common.Hash)
 		setSenderFromServer(json.Tx, *json.From, *json.BlockHash)
 	}
 	return json, json.BlockNumber == nil, nil
+}
+
+// TestNetworkAccess test average state access time on mainnet
+func TestNetworkAccess(rpc string) error {
+
+	rpcCtx := context.Background()
+	rpcClient, err := DialContext(rpcCtx, rpc)
+	if err != nil {
+		return err
+	}
+	defer rpcClient.Close()
+
+	// some verified accounts from etherscan including contracts and external accounts
+	accounts := []common.Address{
+		common.HexToAddress("0xdac17f958d2ee523a2206206994597c13d831ec7"),
+		common.HexToAddress("0xB8c77482e45F1F44dE1745F52C74426C631bDD52"),
+		common.HexToAddress("0x3e17ccb9851a985e2146be4a9874ba2286883ca9"),
+		common.HexToAddress("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
+		common.HexToAddress("0x61edcdf5bb737adffe5043706e7c5bb1f1a56eea"),
+		common.HexToAddress("0xc61b9bb3a7a0767e3179713f3a5c7a9aedce193c"),
+		common.HexToAddress("0x6ae6f08fdf96f3773060cd830173521802d523a4"),
+		common.HexToAddress("0x93fab8cc2d9e27aa0b757f3ff96e7b15402a6d86"),
+	}
+
+	// slots of some contracts
+	slots := map[common.Address]common.Hash{
+		common.HexToAddress("0xdac17f958d2ee523a2206206994597c13d831ec7"): common.HexToHash("0x775ffed4ccf89c25a8839488fe26f859e220f9fa0165f328e1c4e0f55e484ef1"),
+		common.HexToAddress("0xc4347dbda0078d18073584602cf0c1572541bb15"): common.HexToHash("0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103"),
+		common.HexToAddress("0x452aa05fa52b6e23e7001f854e58648169f7ad00"): common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000"),
+		common.HexToAddress("0x0c6c04acf48a5a093ca59e4bda996362adcdcacf"): common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000014"),
+		common.HexToAddress("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"): common.HexToHash("0xaced72359d8708e95d2112ba70e71fa267967a5588d15e7c78c1904e0debe410"),
+		common.HexToAddress("0xd8e3fb3b08eba982f2754988d70d57edc0055ae6"): common.HexToHash("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"),
+		common.HexToAddress("0xa1306fd923a100700d5c6f94b806ae65ad65a1d1"): common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001"),
+		common.HexToAddress("0xa68dd8cb83097765263adad881af6eed479c4a33"): common.HexToHash("0x745448ebd86f892e3973b919a6686b32d8505f8eb2e02df5a36797f187adb881"),
+		common.HexToAddress("0xf411903cbc70a74d22900a5de66a2dda66507255"): common.HexToHash("0xe3ee2b6dbeb46c2e05f3cf0b7622347ca4346a14dc2cc359f69e00ab7c8b59b6"),
+		common.HexToAddress("0x44b1f8924d9ed44e81060d538b337ead8025ef94"): common.HexToHash("0x8d8b1e86bb8f933587fcf89e9dc79e54b489335397be5a36a33b922c9d824a7a"),
+	}
+
+	blockNums := []*big.Int{
+		big.NewInt(13996000),
+		big.NewInt(13998000),
+		big.NewInt(14000000),
+	}
+
+	total := int64(0)
+	for _, blockNum := range blockNums {
+		for _, account := range accounts {
+			start := time.Now()
+			_, err := rpcClient.GetAccountAt(rpcCtx, &account, blockNum)
+			total += int64(time.Since(start))
+			if err != nil {
+				fmt.Printf("Error occurs at %v %v, %v", blockNum, account, err)
+			}
+		}
+
+		for address, key := range slots {
+			start := time.Now()
+			_, err := rpcClient.GetStorageAt(rpcCtx, &address, &key, blockNum)
+			total += int64(time.Since(start))
+			if err != nil {
+				fmt.Printf("Error occurs at %v %v:%v, %v", blockNum, address, key, err)
+			}
+		}
+	}
+
+	average := time.Duration(total / int64(len(blockNums)*(len(accounts)+len(slots))))
+
+	fmt.Printf("Average state access time is %v\n", average)
+	return nil
 }

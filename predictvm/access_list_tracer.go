@@ -17,6 +17,7 @@
 package predictvm
 
 import (
+	"fmt"
 	"math/big"
 	"os"
 	"sync/atomic"
@@ -132,6 +133,9 @@ type AccessListTracer struct {
 
 	interrupt uint32 // Atomic flag to signal execution interruption
 	reason    error  // Textual reason for the interruption
+
+	Round int
+	Step  int64 // Step in every round
 }
 
 // NewAccessListTracer creates a new tracer that can generate AccessLists.
@@ -223,6 +227,12 @@ func (a *AccessListTracer) GetNewStorageSlots() types.AccessList {
 	return acl
 }
 
+func (a *AccessListTracer) LogRound() {
+	if a.logger != nil {
+		fmt.Fprintf(os.Stdout, "//*******************ROUND %d*************************//\n", a.Round)
+	}
+}
+
 func (a *AccessListTracer) Stop(err error) {
 	a.reason = err
 	atomic.StoreUint32(&a.interrupt, 1)
@@ -235,14 +245,15 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 	if atomic.LoadUint32(&a.interrupt) > 0 {
 		if a.logger != nil {
 			a.logger.CaptureState(env, pc, op, gas, cost, scope, rData, depth, a.reason)
-			a.logger.WriteLastTrace(os.Stdout, "")
+			a.logger.WriteLastTrace(os.Stdout, fmt.Sprintf("Step=%08x", a.Step))
 		}
+		env.Cancel()
 		return
 	}
 
 	if a.logger != nil {
 		a.logger.CaptureState(env, pc, op, gas, cost, scope, rData, depth, err)
-		a.logger.WriteLastTrace(os.Stdout, "")
+		a.logger.WriteLastTrace(os.Stdout, fmt.Sprintf("Step=%08x", a.Step))
 	}
 
 	stack := scope.Stack
@@ -260,7 +271,7 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 			a.HasMore = true
 		}
 		a.Touches++
-		//fmt.Printf("%x\t%v\t%v %v\n", pc, op, scope.Contract.Address(), loc.Hex())
+		//fmt.Printf("%d:%d:%d\t%x\t%v\t%v %v\n", a.Touches, env.depth, env.branchDepth, pc, op, scope.Contract.Address(), loc.Hex())
 	}
 	if (op == EXTCODECOPY || op == EXTCODEHASH || op == EXTCODESIZE || op == BALANCE || op == SELFDESTRUCT) && stack.len() >= 1 {
 		loc := stack.data[stack.len()-1]
@@ -275,7 +286,7 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 			a.HasMore = true
 		}
 		a.Touches++
-		//fmt.Printf("%x\t%v\t%v\n", pc, op, loc.Hex())
+		//fmt.Printf("%d:%d:%d\t%x\t%v\t%v\n", a.Touches, env.depth, env.branchDepth, pc, op, loc.Hex())
 	}
 	if (op == DELEGATECALL || op == CALL || op == STATICCALL || op == CALLCODE) && stack.len() >= 5 {
 		loc := stack.data[stack.len()-2]
@@ -292,8 +303,10 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 			a.HasMore = true
 		}
 		a.Touches++
-		//fmt.Printf("%x\t%v\t%v\n", pc, op, loc.Hex())
+		//fmt.Printf("%d:%d:%d\t%x\t%v\t%v\n", a.Touches, env.depth, env.branchDepth, pc, op, loc.Hex())
 	}
+
+	a.Step++
 }
 
 func (a *AccessListTracer) CaptureFault(env *EVM, pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, depth int, err error) {

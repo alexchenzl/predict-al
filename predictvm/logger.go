@@ -22,6 +22,7 @@ import (
 	"io"
 	"math/big"
 	"predict_acl/predictvm/fakestate"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -102,7 +103,7 @@ func (s *StructLog) ErrorString() string {
 }
 
 // Tracer is used to collect execution traces from an EVM transaction
-// execution. CaptureState is called for each step of the VM with the
+// execution. CaptureState is called for each Step of the VM with the
 // current VM state.
 // Note that reference types are actual VM data structures; make copies
 // if you need to retain them beyond the current call.
@@ -172,8 +173,15 @@ func (l *StructLogger) CaptureState(env *EVM, pc uint64, op OpCode, gas, cost ui
 	// Copy a snapshot of the current stack state to a new buffer
 	var stck []uint256.Int
 	if !l.cfg.DisableStack {
-		stck = make([]uint256.Int, len(stack.Data()))
-		for i, item := range stack.Data() {
+
+		//  usually top 16 items is enough
+		size := 16
+		stackData := stack.Data()
+		if len(stackData) < size {
+			size = len(stack.Data())
+		}
+		stck = make([]uint256.Int, size)
+		for i, item := range stackData[len(stackData)-size:] {
 			stck[i] = item
 		}
 	}
@@ -257,17 +265,25 @@ func (l *StructLogger) Error() error { return l.err }
 func (l *StructLogger) Output() []byte { return l.output }
 
 func (l *StructLogger) WriteLastTrace(writer io.Writer, tag string) {
-	if len(tag) > 0 {
-		fmt.Fprintf(writer, tag)
-	}
-	WriteTrace(writer, l.logs[len(l.logs)-1:])
+	l.WriteTrace(writer, tag, l.logs[len(l.logs)-1:])
 }
 
 // WriteTrace writes a formatted trace to the given writer
-func WriteTrace(writer io.Writer, logs []StructLog) {
+func (l *StructLogger) WriteTrace(writer io.Writer, tag string, logs []StructLog) {
 	for _, log := range logs {
-		fmt.Fprintf(writer, "contract=%s %-16spc=%08x depth=%v branch-depth=%v", log.Contract, log.Op, log.Pc, log.Depth, log.BranchDepth)
-		if len(log.Info) > 0 {
+		tabs := ""
+		if log.Depth > 0 {
+			tabs = strings.Repeat("\t", log.Depth-1)
+		}
+
+		fmt.Fprintf(writer, "%v%v %-16spc=%08x depth=%v", tabs, tag, log.Op, log.Pc, log.Depth)
+
+		if log.BranchDepth > 0 {
+			fmt.Fprintf(writer, " branch=%v", log.BranchDepth)
+		}
+
+		// if stack is present, info is not necessary
+		if len(log.Info) > 0 && l.cfg.DisableStack {
 			fmt.Fprintf(writer, " info=%s", log.Info)
 		}
 
@@ -276,25 +292,25 @@ func WriteTrace(writer io.Writer, logs []StructLog) {
 		}
 		fmt.Fprintln(writer)
 
-		if len(log.Stack) > 0 {
-			fmt.Fprintln(writer, "Stack:")
+		if !l.cfg.DisableStack {
+			fmt.Fprintf(writer, "%vStack:\n", tabs)
 			for i := len(log.Stack) - 1; i >= 0; i-- {
-				fmt.Fprintf(writer, "\t%08d  %s\n", len(log.Stack)-i-1, log.Stack[i].Hex())
+				fmt.Fprintf(writer, "\t%v%s\n", tabs, log.Stack[i].Hex())
 			}
 		}
 		if len(log.Memory) > 0 {
-			fmt.Fprintln(writer, "Memory:")
-			fmt.Fprint(writer, hex.Dump(log.Memory))
+			fmt.Fprintf(writer, "%vMemory:\n", tabs)
+			fmt.Fprintf(writer, "\t%v%s\n", tabs, hex.Dump(log.Memory))
 		}
 		if len(log.Storage) > 0 {
-			fmt.Fprintln(writer, "Storage:")
+			fmt.Fprintf(writer, "%vStorage:\n", tabs)
 			for h, item := range log.Storage {
-				fmt.Fprintf(writer, "\t%x: %x\n", h, item)
+				fmt.Fprintf(writer, "\t%v%x: %x\n", tabs, h, item)
 			}
 		}
-		if len(log.ReturnData) > 0 {
-			fmt.Fprintln(writer, "ReturnData:")
-			fmt.Fprint(writer, hex.Dump(log.ReturnData))
+		if len(log.ReturnData) > 0 && (log.Op == RETURN || log.Op == REVERT || log.Op == STOP || log.Op == SELFDESTRUCT) {
+			fmt.Fprintf(writer, "%vReturnData:\n", tabs)
+			fmt.Fprintf(writer, "\t%v%s\n", tabs, hex.EncodeToString(log.ReturnData))
 		}
 		fmt.Fprintln(writer)
 	}

@@ -134,6 +134,10 @@ var (
 		Name:  "noreturndata",
 		Usage: "enable return data output, default true",
 	}
+	TestNetworkFlag = cli.BoolFlag{
+		Name:  "testnetwork",
+		Usage: "test RPC server access",
+	}
 
 	OriginCommandHelpTemplate = `{{.Name}}{{if .Subcommands}} command{{end}}{{if .Flags}} [command options]{{end}} {{.ArgsUsage}}
 {{if .Description}}{{.Description}}
@@ -204,6 +208,10 @@ type TxPredictResult struct {
 	Ts int             `json:"ts"` // total storage slots
 	Rd []TxRoundRecord `json:"rd"` // records of every round
 	E  string          `json:"e,omitempty"`
+	St time.Duration   `json:"st"` // stats: execution time, in nanoseconds
+	Sa int64           `json:"sa"` // stats: The number of heap allocations during execution
+	Sb int64           `json:"sb"` // stats: The cumulative number of bytes allocated during execution.
+
 }
 
 type TxRoundRecord struct {
@@ -216,10 +224,17 @@ func runCmd(ctx *cli.Context) error {
 	gLogger.Verbosity(log.Lvl(ctx.GlobalInt(VerbosityFlag.Name)))
 	log.Root().SetHandler(gLogger)
 
-	var err error
-	var result *TxPredictResult
+	var (
+		err    error
+		result *TxPredictResult
+	)
+
 	rpc := ctx.GlobalString(RpcFlag.Name)
 	if rpc != "" {
+		if ctx.GlobalBool(TestNetworkFlag.Name) {
+			return fakestate.TestNetworkAccess(rpc)
+		}
+
 		txHash := ctx.GlobalString(TxHashFlag.Name)
 		block := ctx.GlobalInt64(BlockFlag.Name)
 		if txHash != "" {
@@ -296,7 +311,7 @@ func runRawCodeLocally(ctx *cli.Context) (*TxPredictResult, error) {
 func runHistoryTransaction(ctx *cli.Context, rpc string, txHash string) (*TxPredictResult, error) {
 
 	rpcCtx := context.Background()
-	rpcClient, err := fakestate.DialContext(context.Background(), rpc)
+	rpcClient, err := fakestate.DialContext(rpcCtx, rpc)
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +387,7 @@ func runNewTransaction(ctx *cli.Context, rpc string) (*TxPredictResult, error) {
 	}
 
 	rpcCtx := context.Background()
-	rpcClient, err := fakestate.DialContext(context.Background(), rpc)
+	rpcClient, err := fakestate.DialContext(rpcCtx, rpc)
 	if err != nil {
 		return nil, err
 	}
@@ -420,7 +435,7 @@ func runBatch(ctx *cli.Context, rpc string, chainConfig *params.ChainConfig, bhC
 
 			rpcClient, err := fakestate.DialContext(context.Background(), rpc)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error occured in runBatch: %v", err.Error())
+				fmt.Fprintf(os.Stderr, "Error occured in runBatch %d: %v", block.Number().Int64(), err.Error())
 				return
 			}
 			defer rpcClient.Close()
@@ -434,13 +449,15 @@ func runBatch(ctx *cli.Context, rpc string, chainConfig *params.ChainConfig, bhC
 				from := msg.From()
 				hash := tx.Hash().Hex()
 
+				//fmt.Fprintf(os.Stdout, "task %v begin\n", hash)
 				res, err := runPredictTxTask(ctx, rpcClient, runtimeConfig, hash, &from, msg.To(), msg.Value(), msg.GasPrice(), msg.Data(), nil)
 				if err != nil {
 					results[task.index] = &TxPredictResult{H: hash, E: err.Error()}
-					fmt.Fprintf(os.Stderr, "task %v: %v", hash, err)
+					fmt.Fprintf(os.Stderr, "task error %v:%v: %v\n", block.Number().Int64(), hash, err)
 				} else if res != nil {
 					res.H = hash
 					results[task.index] = res
+					//fmt.Fprintf(os.Stdout, "task %v done\n", hash)
 				}
 			}
 		}()
@@ -464,7 +481,7 @@ func runHistoryBlock(ctx *cli.Context, rpc string, blockNum *big.Int) ([]*TxPred
 	}
 
 	rpcCtx := context.Background()
-	rpcClient, err := fakestate.DialContext(context.Background(), rpc)
+	rpcClient, err := fakestate.DialContext(rpcCtx, rpc)
 	if err != nil {
 		return nil, err
 	}
@@ -567,6 +584,21 @@ func runPredictTxTask(ctx *cli.Context, rpcClient *fakestate.RpcClient, runtimeC
 
 func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender *common.Address, receiver *common.Address, code []byte, data []byte) (*TxPredictResult, error) {
 
+	var txResult *TxPredictResult
+	var memStatsBefore goruntime.MemStats
+	goruntime.ReadMemStats(&memStatsBefore)
+	startTime := time.Now()
+
+	defer func() {
+		if txResult != nil {
+			var memStatsAfter goruntime.MemStats
+			goruntime.ReadMemStats(&memStatsAfter)
+			txResult.St = time.Since(startTime)
+			txResult.Sa = int64(memStatsAfter.Mallocs - memStatsBefore.Mallocs)
+			txResult.Sb = int64(memStatsAfter.TotalAlloc - memStatsBefore.TotalAlloc)
+		}
+	}()
+
 	logConfig := &vm.LogConfig{
 		EnableMemory:     !ctx.GlobalBoolT(DisableMemoryFlag.Name),
 		DisableStack:     ctx.GlobalBoolT(DisableStackFlag.Name),
@@ -581,7 +613,7 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender 
 		Debug: true,
 	}
 
-	txResult := &TxPredictResult{
+	txResult = &TxPredictResult{
 		Rd: make([]TxRoundRecord, 1, 2),
 	}
 	// Initial state accesses
@@ -613,15 +645,16 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender 
 	}()
 	defer cancel()
 
-	round := 0
 	mr := ctx.GlobalInt(MaxRoundsFlag.Name)
 	for {
+		tracer.LogRound()
+
 		if creating {
 			runtime.Create(data, runtimeConfig)
 		} else {
 			runtime.Call(*receiver, data, runtimeConfig)
 		}
-		round++
+		tracer.Round++
 
 		roundResult := TxRoundRecord{
 			A: tracer.GetNewAccounts(),
@@ -634,7 +667,7 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender 
 		txResult.Ts = txResult.Ts + slotNum
 		txResult.Rd = append(txResult.Rd, roundResult)
 
-		if runtimeConfig.Fetcher == nil || accountNum == 0 && slotNum == 0 || mr > 0 && round >= mr {
+		if runtimeConfig.Fetcher == nil || accountNum == 0 && slotNum == 0 || mr > 0 && tracer.Round >= mr || !tracer.HasMore {
 			break
 		}
 
@@ -668,12 +701,12 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender 
 		runtimeConfig.State = runtimeConfig.Fetcher.CopyStatedb()
 		tracer.AppendListToKnownList()
 		tracer.Touches = 0
-		//tracer.HasMore = false
+		tracer.Step = 0
+		tracer.HasMore = false
 	}
 
-	txResult.Tr = round
+	txResult.Tr = tracer.Round
 	txResult.Tt = tracer.Touches
-
 	return txResult, nil
 }
 
@@ -719,6 +752,10 @@ func printResults(results []*TxPredictResult) {
 		fmt.Printf("Total accounts:       %d\n", result.Ta)
 		fmt.Printf("Total storage slots:  %d\n", result.Ts)
 		fmt.Printf("Retrieval batches:    %v\n", batches)
+		fmt.Printf("Execution time:       %v\n", result.St)
+		fmt.Printf("Allocations:          %v\n", result.Sa)
+		fmt.Printf("Bytes allocated:      %v\n", result.Sb)
+
 	}
 
 }
@@ -767,6 +804,7 @@ func init() {
 		DisableStackFlag,
 		DisableStorageFlag,
 		DisableReturnDataFlag,
+		TestNetworkFlag,
 	}
 
 	app.Action = runCmd
