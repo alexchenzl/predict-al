@@ -740,14 +740,6 @@ func opJump(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byt
 func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	pos, cond := scope.Stack.pop(), scope.Stack.pop()
 
-	jump := scope.Jumps[*pc]
-	jump++
-	scope.Jumps[*pc] = jump
-	// Avoid too many loops, this is a magic number
-	if jump > 256 {
-		return nil, ErrJumpiTooManyLoops
-	}
-
 	if !cond.Eq(UnknownValuePlaceHolder) {
 		if !cond.IsZero() {
 			if !scope.Contract.validJumpdest(&pos) {
@@ -758,7 +750,7 @@ func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]by
 			*pc++
 		}
 	} else {
-		// Avoid infinite loop
+		// Avoid possible infinite loop
 		jump2 := scope.Jumps2[*pc]
 		jump2++
 		scope.Jumps2[*pc] = jump2

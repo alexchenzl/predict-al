@@ -231,6 +231,15 @@ func (s *FakeStateDB) Empty(addr common.Address) bool {
 	return so == nil || so.empty()
 }
 
+// GetCommittedState retrieves a value from the given account's committed storage trie.
+func (s *FakeStateDB) GetCommittedState(addr common.Address, hash common.Hash) common.Hash {
+	stateObject := s.getStateObject(addr)
+	if stateObject != nil {
+		return stateObject.GetCommittedState(hash)
+	}
+	return common.Hash{}
+}
+
 func (s *FakeStateDB) RevertToSnapshot(int) {
 
 }

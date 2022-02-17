@@ -58,19 +58,16 @@ var (
 		Usage: "Height of the history block within which all transactions contained will be executed. If tx is provided, block would be ignored",
 		Value: -1,
 	}
-
 	BatchFlag = cli.IntFlag{
 		Name:  "batch",
 		Usage: "number of transactions that will be run concurrently in a batch, default is 32",
 		Value: 32,
 	}
-
 	TimeoutFlag = cli.IntFlag{
 		Name:  "timeout",
 		Usage: "maximum seconds to run a transaction, default is 5",
 		Value: 5,
 	}
-
 	CodeFlag = cli.StringFlag{
 		Name:  "code",
 		Usage: "Raw EVM code",
@@ -87,6 +84,16 @@ var (
 	DataFlag = cli.StringFlag{
 		Name:  "data",
 		Usage: "The transaction input data",
+	}
+	GasFlag = cli.Uint64Flag{
+		Name:  "gas",
+		Usage: "gas limit for the evm",
+		Value: 10000000000,
+	}
+	PriceFlag = utils.BigFlag{
+		Name:  "price",
+		Usage: "price set for the evm",
+		Value: big.NewInt(50_000_000_000),
 	}
 	VerbosityFlag = cli.IntFlag{
 		Name:  "verbosity",
@@ -185,7 +192,6 @@ func newChainConfig(client *fakestate.RpcClient) *params.ChainConfig {
 func newRuntimeConfig(header *types.Header, chainConfig *params.ChainConfig, txTime, txBlockNum *big.Int) *runtime.Config {
 	runtimeConfig := &runtime.Config{
 		ChainConfig: chainConfig,
-		GasLimit:    header.GasLimit,
 		Difficulty:  header.Difficulty,
 		Time:        txTime,
 		Coinbase:    header.Coinbase,
@@ -358,7 +364,7 @@ func runHistoryTransaction(ctx *cli.Context, rpc string, txHash string) (*TxPred
 	runtimeConfig.GetHashFn = bhCache.GetHashFn
 
 	hash := tx.Tx.Hash().Hex()
-	result, err := runPredictTxTask(ctx, rpcClient, runtimeConfig, hash, tx.From, tx.Tx.To(), tx.Tx.Value(), tx.Tx.GasPrice(), tx.Tx.Data(), nil)
+	result, err := runPredictTxTask(ctx, rpcClient, runtimeConfig, hash, tx.From, tx.Tx.To(), tx.Tx.Value(), tx.Tx.GasPrice(), tx.Tx.Gas(), tx.Tx.Data(), nil)
 	if err == nil {
 		result.H = hash
 	}
@@ -413,7 +419,10 @@ func runNewTransaction(ctx *cli.Context, rpc string) (*TxPredictResult, error) {
 	hexInput := []byte(ctx.GlobalString(DataFlag.Name))
 	input := common.FromHex(string(bytes.TrimSpace(hexInput)))
 	value := utils.GlobalBig(ctx, ValueFlag.Name)
-	return runPredictTxTask(ctx, rpcClient, runtimeConfig, "", from, to, value, new(big.Int), input, code)
+
+	gasLimit := ctx.GlobalUint64(GasFlag.Name)
+	price := utils.GlobalBig(ctx, PriceFlag.Name)
+	return runPredictTxTask(ctx, rpcClient, runtimeConfig, "", from, to, value, price, gasLimit, input, code)
 }
 
 func runBatch(ctx *cli.Context, rpc string, chainConfig *params.ChainConfig, bhCache *fakestate.BlockHashCache, block *types.Block, txs []*types.Transaction) ([]*TxPredictResult, error) {
@@ -450,7 +459,7 @@ func runBatch(ctx *cli.Context, rpc string, chainConfig *params.ChainConfig, bhC
 				hash := tx.Hash().Hex()
 
 				//fmt.Fprintf(os.Stdout, "task %v begin\n", hash)
-				res, err := runPredictTxTask(ctx, rpcClient, runtimeConfig, hash, &from, msg.To(), msg.Value(), msg.GasPrice(), msg.Data(), nil)
+				res, err := runPredictTxTask(ctx, rpcClient, runtimeConfig, hash, &from, msg.To(), msg.Value(), msg.GasPrice(), msg.Gas(), msg.Data(), nil)
 				if err != nil {
 					results[task.index] = &TxPredictResult{H: hash, E: err.Error()}
 					fmt.Fprintf(os.Stderr, "task error %v:%v: %v\n", block.Number().Int64(), hash, err)
@@ -562,7 +571,8 @@ func parseCode(ctx *cli.Context) []byte {
 	return nil
 }
 
-func runPredictTxTask(ctx *cli.Context, rpcClient *fakestate.RpcClient, runtimeConfig *runtime.Config, hash string, from, to *common.Address, value, gasPrice *big.Int, data, code []byte) (*TxPredictResult, error) {
+func runPredictTxTask(ctx *cli.Context, rpcClient *fakestate.RpcClient, runtimeConfig *runtime.Config, hash string, from, to *common.Address, value, gasPrice *big.Int, gasLimit uint64, data, code []byte) (*TxPredictResult, error) {
+
 	stateDB := fakestate.NewStateDB()
 	// states need to be fetched from parent block
 	fetcher := fakestate.NewStateFetcher(stateDB, rpcClient, big.NewInt(runtimeConfig.BlockNumber.Int64()-1))
@@ -576,6 +586,7 @@ func runPredictTxTask(ctx *cli.Context, rpcClient *fakestate.RpcClient, runtimeC
 	runtimeConfig.Fetcher = fetcher
 	runtimeConfig.State = fetcher.CopyStatedb()
 
+	runtimeConfig.GasLimit = gasLimit
 	runtimeConfig.Origin = *from
 	runtimeConfig.GasPrice = gasPrice
 	runtimeConfig.Value = value
