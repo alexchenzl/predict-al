@@ -49,8 +49,6 @@ type ScopeContext struct {
 	Stack    *Stack
 	Contract *Contract
 
-	// record the execution count of normal jumpi opcodes
-	Jumps map[uint64]int
 	// record the execution count of jumpi opcodes with fake condition values
 	Jumps2 map[uint64]int
 
@@ -151,14 +149,12 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 	var (
 		mem         = NewMemory() // bound memory
 		stack       = newstack()  // local stack
-		jumps       = make(map[uint64]int)
 		jumps2      = make(map[uint64]int)
 		callContext = &ScopeContext{
 			Memory:   mem,
 			Stack:    stack,
 			Contract: contract,
 
-			Jumps:  jumps,
 			Jumps2: jumps2,
 		}
 		// For optimisation reason we're using uint64 as the program counter.
@@ -187,7 +183,6 @@ func (in *EVMInterpreter) RunBranch(pc uint64, callContext *ScopeContext) (ret [
 	var (
 		mem    = NewMemory() // bound memory
 		stack  = newstack()  // local stack
-		jumps  = make(map[uint64]int)
 		jumps2 = make(map[uint64]int)
 
 		newCallContext = &ScopeContext{
@@ -195,10 +190,8 @@ func (in *EVMInterpreter) RunBranch(pc uint64, callContext *ScopeContext) (ret [
 			Stack:    stack,
 			Contract: callContext.Contract,
 
-			Jumps:  jumps,
 			Jumps2: jumps2,
-
-			Steps: callContext.Steps,
+			Steps:  callContext.Steps,
 		}
 
 		curReturnData []byte
@@ -218,9 +211,6 @@ func (in *EVMInterpreter) RunBranch(pc uint64, callContext *ScopeContext) (ret [
 	mem.store = callContext.Memory.GetCopy(0, int64(callContext.Memory.Len()))
 
 	// Clone the jumpis
-	for k, v := range callContext.Jumps {
-		jumps[k] = v
-	}
 	for k, v := range callContext.Jumps2 {
 		jumps2[k] = v
 	}
@@ -236,13 +226,16 @@ func (in *EVMInterpreter) RunBranch(pc uint64, callContext *ScopeContext) (ret [
 		copy(curReturnData, in.returnData)
 	}
 
+	// backup current gas
+	curGas := callContext.Contract.Gas
+
 	defer func() {
 		callContext.Steps = newCallContext.Steps
 
+		callContext.Contract.Gas = curGas
 		if curReturnData != nil {
 			copy(in.returnData, curReturnData)
 		}
-
 		in.evm.StateDB = statedb
 		returnStack(stack)
 	}()
@@ -296,7 +289,6 @@ func (in *EVMInterpreter) runOpCodes(pc uint64, callContext *ScopeContext) (ret 
 		if operation == nil {
 			return nil, &ErrInvalidOpCode{opcode: op}
 		}
-
 		// Validate stack
 		if sLen := callContext.Stack.len(); sLen < operation.minStack {
 			return nil, &ErrStackUnderflow{stackLen: sLen, required: operation.minStack}
@@ -315,10 +307,10 @@ func (in *EVMInterpreter) runOpCodes(pc uint64, callContext *ScopeContext) (ret 
 			}
 		}
 		// Static portion of gas
-		//cost = operation.constantGas // For tracing
-		//if !callContext.Contract.UseGas(operation.constantGas) {
-		//	return nil, ErrOutOfGas
-		//}
+		cost = operation.constantGas // For tracing
+		if !callContext.Contract.UseGas(operation.constantGas) {
+			return nil, ErrOutOfGas
+		}
 
 		var memorySize uint64
 		// calculate the new memory size and expand the memory to fit
@@ -339,14 +331,14 @@ func (in *EVMInterpreter) runOpCodes(pc uint64, callContext *ScopeContext) (ret 
 		// Dynamic portion of gas
 		// consume the gas and return an error if not enough gas is available.
 		// cost is explicitly set so that the capture state defer method can get the proper cost
-		//if operation.dynamicGas != nil {
-		//	var dynamicCost uint64
-		//	dynamicCost, err = operation.dynamicGas(in.evm, callContext.Contract, callContext.Stack, callContext.Memory, memorySize)
-		//	cost += dynamicCost // total cost, for debug tracing
-		//	if err != nil || !callContext.Contract.UseGas(dynamicCost) {
-		//		return nil, ErrOutOfGas
-		//	}
-		//}
+		if operation.dynamicGas != nil {
+			var dynamicCost uint64
+			dynamicCost, err = operation.dynamicGas(in.evm, callContext.Contract, callContext.Stack, callContext.Memory, memorySize)
+			cost += dynamicCost // total cost, for debug tracing
+			if err != nil || !callContext.Contract.UseGas(dynamicCost) {
+				return nil, ErrOutOfGas
+			}
+		}
 		if memorySize > 0 {
 			callContext.Memory.Resize(memorySize)
 		}
