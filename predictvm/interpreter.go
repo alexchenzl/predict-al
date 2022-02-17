@@ -26,7 +26,7 @@ import (
 	"predict_acl/predictvm/fakestate"
 )
 
-// RunBranchDepth Maximum depth of RunBranch stack. If the depth is n, there will be 2^n branches
+// RunBranchDepth Maximum depth of RunBranch stack, to avoid branch explosion
 const RunBranchDepth int = 8
 
 // Config are the configuration options for the Interpreter
@@ -48,8 +48,13 @@ type ScopeContext struct {
 	Memory   *Memory
 	Stack    *Stack
 	Contract *Contract
-	// record the execution count of jumpi opcodes
-	Jumpis map[uint64]int
+
+	// record the execution count of normal jumpi opcodes
+	Jumps map[uint64]int
+	// record the execution count of jumpi opcodes with fake condition values
+	Jumps2 map[uint64]int
+
+	Steps uint64
 }
 
 // keccakState wraps sha3.state. In addition to the usual hash methods, it also supports
@@ -70,8 +75,6 @@ type EVMInterpreter struct {
 
 	readOnly   bool   // Whether to throw on stateful modifications
 	returnData []byte // Last CALL's return data for subsequent reuse
-
-	callContext *ScopeContext
 }
 
 // NewEVMInterpreter returns a new instance of the Interpreter.
@@ -149,11 +152,14 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 		mem         = NewMemory() // bound memory
 		stack       = newstack()  // local stack
 		jumps       = make(map[uint64]int)
+		jumps2      = make(map[uint64]int)
 		callContext = &ScopeContext{
 			Memory:   mem,
 			Stack:    stack,
 			Contract: contract,
-			Jumpis:   jumps,
+
+			Jumps:  jumps,
+			Jumps2: jumps2,
 		}
 		// For optimisation reason we're using uint64 as the program counter.
 		// It's theoretically possible to go above 2^64. The YP defines the PC
@@ -169,27 +175,33 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 	}()
 	contract.Input = input
 
-	in.callContext = callContext
-	return in.runOpCodes(pc)
+	return in.runOpCodes(pc, callContext)
 }
 
 // RunBranch Clone the current call context to run one JUMPI branch
-func (in *EVMInterpreter) RunBranch(pc uint64) (ret []byte, err error) {
+func (in *EVMInterpreter) RunBranch(pc uint64, callContext *ScopeContext) (ret []byte, err error) {
 	// Increment the branch depth which is restricted to
 	in.evm.branchDepth++
 	defer func() { in.evm.branchDepth-- }()
 
-	callContext := in.callContext
 	var (
-		mem            = NewMemory() // bound memory
-		stack          = newstack()  // local stack
-		jumpis         = make(map[uint64]int)
+		mem    = NewMemory() // bound memory
+		stack  = newstack()  // local stack
+		jumps  = make(map[uint64]int)
+		jumps2 = make(map[uint64]int)
+
 		newCallContext = &ScopeContext{
 			Memory:   mem,
 			Stack:    stack,
 			Contract: callContext.Contract,
-			Jumpis:   jumpis,
+
+			Jumps:  jumps,
+			Jumps2: jumps2,
+
+			Steps: callContext.Steps,
 		}
+
+		curReturnData []byte
 	)
 
 	// Clone the current stack
@@ -206,37 +218,48 @@ func (in *EVMInterpreter) RunBranch(pc uint64) (ret []byte, err error) {
 	mem.store = callContext.Memory.GetCopy(0, int64(callContext.Memory.Len()))
 
 	// Clone the jumpis
-	for k, v := range callContext.Jumpis {
-		jumpis[k] = v
+	for k, v := range callContext.Jumps {
+		jumps[k] = v
+	}
+	for k, v := range callContext.Jumps2 {
+		jumps2[k] = v
 	}
 
 	// snapshot is not implemented yet, so clone the statedb instead
 	statedb := in.evm.StateDB
 	in.evm.StateDB = in.evm.StateDB.(*fakestate.FakeStateDB).Copy()
 
-	in.callContext = newCallContext
+	// backup current interpreter returnData
+	if in.returnData != nil {
+		size := len(in.returnData)
+		curReturnData = make([]byte, size)
+		copy(curReturnData, in.returnData)
+	}
 
 	defer func() {
-		in.callContext = callContext
+		callContext.Steps = newCallContext.Steps
+
+		if curReturnData != nil {
+			copy(in.returnData, curReturnData)
+		}
+
 		in.evm.StateDB = statedb
 		returnStack(stack)
 	}()
 
-	return in.runOpCodes(pc)
+	return in.runOpCodes(pc, newCallContext)
 }
 
-func (in *EVMInterpreter) runOpCodes(pc uint64) (ret []byte, err error) {
+func (in *EVMInterpreter) runOpCodes(pc uint64, callContext *ScopeContext) (ret []byte, err error) {
 	var (
 		op   OpCode // current opcode
 		cost uint64
 		// copies used by tracer
 		pcCopy  uint64 // needed for the deferred Tracer
 		gasCopy uint64 // for Tracer to log gas remaining before execution
-		logged  bool   // deferred Tracer should ignore already logged steps
+		logged  bool   // deferred Tracer should ignore already logged Steps
 		res     []byte // result of the opcode execution function
 	)
-
-	callContext := in.callContext
 
 	if in.cfg.Debug {
 		defer func() {
@@ -254,11 +277,12 @@ func (in *EVMInterpreter) runOpCodes(pc uint64) (ret []byte, err error) {
 	// explicit STOP, RETURN or SELFDESTRUCT is executed, an error occurred during
 	// the execution of one of the operations or until the done flag is set by the
 	// parent context.
-	steps := 0
 	for {
-		steps++
-		if steps%1000 == 0 && atomic.LoadInt32(&in.evm.abort) != 0 {
-			break
+		callContext.Steps++
+		// return error to avoid running more branches
+		if callContext.Steps%1024 == 0 && atomic.LoadInt32(&in.evm.abort) != 0 {
+			//fmt.Printf("%08x Abort branch %d:%d at step %d\n", pc, in.evm.depth, in.evm.branchDepth, callContext.Steps)
+			return nil, ErrAbort
 		}
 		if in.cfg.Debug {
 			// Capture pre-execution values for tracing.
@@ -272,6 +296,7 @@ func (in *EVMInterpreter) runOpCodes(pc uint64) (ret []byte, err error) {
 		if operation == nil {
 			return nil, &ErrInvalidOpCode{opcode: op}
 		}
+
 		// Validate stack
 		if sLen := callContext.Stack.len(); sLen < operation.minStack {
 			return nil, &ErrStackUnderflow{stackLen: sLen, required: operation.minStack}

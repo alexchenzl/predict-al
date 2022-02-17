@@ -17,8 +17,10 @@
 package predictvm
 
 import (
+	"fmt"
 	"math/big"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -26,11 +28,11 @@ import (
 )
 
 // accessList is an accumulator for the set of accounts and storage slots an EVM
-// contract execution touches.
+// contract execution Touches.
 type accessList map[common.Address]accessListSlots
 
 // accessListSlots is an accumulator for the set of storage slots within a single
-// contract that an EVM contract execution touches.
+// contract that an EVM contract execution Touches.
 type accessListSlots map[common.Hash]struct{}
 
 // newAccessList creates a new accessList.
@@ -125,23 +127,33 @@ type AccessListTracer struct {
 	excl      map[common.Address]struct{} // Set of account to exclude from the list
 	list      accessList                  // Set of accounts and storage slots touched
 	knownList accessList                  // Already known accounts and storage slots in last rounds
-	HasMore   bool
-	logger    *StructLogger
+	Touches   int                         // Total state access times
+	HasMore   bool                        // Whether there's more unknown states in this round
+	logger    *StructLogger               // Detailed debug information logger
+
+	interrupt uint32 // Atomic flag to signal execution interruption
+	reason    error  // Textual reason for the interruption
+
+	Round int
+	Step  int64 // Step in every round
 }
 
 // NewAccessListTracer creates a new tracer that can generate AccessLists.
 // An optional AccessList can be set as already known AccessList
 func NewAccessListTracer(acl types.AccessList, from, to *common.Address, precompiles []common.Address, cfg *LogConfig) *AccessListTracer {
-	excl := map[common.Address]struct{}{*from: {}}
-	if to != nil {
-		excl[*to] = struct{}{}
-	}
-
+	excl := map[common.Address]struct{}{}
 	for _, addr := range precompiles {
 		excl[addr] = struct{}{}
 	}
+
 	list := newAccessList()
 	knownList := newAccessList()
+
+	knownList.addAddress(*from)
+	if to != nil {
+		knownList.addAddress(*to)
+	}
+
 	for _, al := range acl {
 		if _, ok := excl[al.Address]; !ok {
 			knownList.addAddress(al.Address)
@@ -179,6 +191,14 @@ func (a *AccessListTracer) AppendListToKnownList() {
 	a.list = newAccessList()
 }
 
+func (a *AccessListTracer) GetKnowAccounts() []common.Address {
+	accounts := make([]common.Address, 0, len(a.knownList))
+	for addr := range a.knownList {
+		accounts = append(accounts, addr)
+	}
+	return accounts
+}
+
 // GetNewAccounts return new accounts found in this round
 func (a *AccessListTracer) GetNewAccounts() []common.Address {
 	accounts := make([]common.Address, 0, len(a.list))
@@ -207,14 +227,33 @@ func (a *AccessListTracer) GetNewStorageSlots() types.AccessList {
 	return acl
 }
 
+func (a *AccessListTracer) LogRound() {
+	if a.logger != nil {
+		fmt.Fprintf(os.Stdout, "//*******************ROUND %d*************************//\n", a.Round)
+	}
+}
+
+func (a *AccessListTracer) Stop(err error) {
+	a.reason = err
+	atomic.StoreUint32(&a.interrupt, 1)
+}
 func (a *AccessListTracer) CaptureStart(env *EVM, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
 }
 
 // CaptureState captures all opcodes that touch storage or addresses and adds them to the accesslist.
 func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, rData []byte, depth int, err error) {
+	if atomic.LoadUint32(&a.interrupt) > 0 {
+		if a.logger != nil {
+			a.logger.CaptureState(env, pc, op, gas, cost, scope, rData, depth, a.reason)
+			a.logger.WriteLastTrace(os.Stdout, fmt.Sprintf("Step=%08x", a.Step))
+		}
+		env.Cancel()
+		return
+	}
+
 	if a.logger != nil {
 		a.logger.CaptureState(env, pc, op, gas, cost, scope, rData, depth, err)
-		a.logger.WriteLastTrace(os.Stdout, "")
+		a.logger.WriteLastTrace(os.Stdout, fmt.Sprintf("Step=%08x", a.Step))
 	}
 
 	stack := scope.Stack
@@ -231,6 +270,8 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 			// This slot address depends on another unknown storage slot
 			a.HasMore = true
 		}
+		a.Touches++
+		//fmt.Printf("%d:%d:%d\t%x\t%v\t%v %v\n", a.Touches, env.depth, env.branchDepth, pc, op, scope.Contract.Address(), loc.Hex())
 	}
 	if (op == EXTCODECOPY || op == EXTCODEHASH || op == EXTCODESIZE || op == BALANCE || op == SELFDESTRUCT) && stack.len() >= 1 {
 		loc := stack.data[stack.len()-1]
@@ -244,6 +285,8 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 		} else {
 			a.HasMore = true
 		}
+		a.Touches++
+		//fmt.Printf("%d:%d:%d\t%x\t%v\t%v\n", a.Touches, env.depth, env.branchDepth, pc, op, loc.Hex())
 	}
 	if (op == DELEGATECALL || op == CALL || op == STATICCALL || op == CALLCODE) && stack.len() >= 5 {
 		loc := stack.data[stack.len()-2]
@@ -259,7 +302,11 @@ func (a *AccessListTracer) CaptureState(env *EVM, pc uint64, op OpCode, gas, cos
 		} else {
 			a.HasMore = true
 		}
+		a.Touches++
+		//fmt.Printf("%d:%d:%d\t%x\t%v\t%v\n", a.Touches, env.depth, env.branchDepth, pc, op, loc.Hex())
 	}
+
+	a.Step++
 }
 
 func (a *AccessListTracer) CaptureFault(env *EVM, pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, depth int, err error) {
@@ -275,7 +322,7 @@ func (a *AccessListTracer) CaptureEnd(output []byte, gasUsed uint64, t time.Dura
 	}
 }
 
-func (*AccessListTracer) CaptureEnter(typ OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
+func (a *AccessListTracer) CaptureEnter(typ OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
 }
 
 func (*AccessListTracer) CaptureExit(output []byte, gasUsed uint64, err error) {}

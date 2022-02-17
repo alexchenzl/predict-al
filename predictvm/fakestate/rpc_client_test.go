@@ -87,6 +87,16 @@ func TestGetStorages(t *testing.T) {
 		fmt.Printf("%v:\t%v --- %v\n", item.Address, item.Key, item.Value)
 	}
 
+	results2, err := client.GetStatesAt(ctx, accounts, keys, nil, nil)
+	if err != nil {
+		t.Fatal("Failed to get storages: ", err)
+	}
+
+	for _, item := range results2 {
+		item := item.(*StorageResult)
+		fmt.Printf("%v:\t%v --- %v\n", item.Address, item.Key, item.Value)
+	}
+
 }
 
 func TestClient_GetBlockHeader(t *testing.T) {

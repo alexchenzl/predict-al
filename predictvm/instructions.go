@@ -18,6 +18,7 @@ package predictvm
 
 import (
 	"bytes"
+	"errors"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
@@ -739,38 +740,48 @@ func opJump(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byt
 func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	pos, cond := scope.Stack.pop(), scope.Stack.pop()
 
-	if !scope.Contract.validJumpdest(&pos) {
-		return nil, ErrInvalidJump
-	}
-
-	jump := scope.Jumpis[*pc]
+	jump := scope.Jumps[*pc]
 	jump++
-	scope.Jumpis[*pc] = jump
-
-	// Avoid too many loops
-	// FIXME this is a magic number, could be configurable
-	if jump > 1024 {
+	scope.Jumps[*pc] = jump
+	// Avoid too many loops, this is a magic number
+	if jump > 256 {
 		return nil, ErrJumpiTooManyLoops
 	}
 
 	if !cond.Eq(UnknownValuePlaceHolder) {
 		if !cond.IsZero() {
+			if !scope.Contract.validJumpdest(&pos) {
+				return nil, ErrInvalidJump
+			}
 			*pc = pos.Uint64()
 		} else {
 			*pc++
 		}
 	} else {
 		// Avoid infinite loop
-		if jump > 1 {
+		jump2 := scope.Jumps2[*pc]
+		jump2++
+		scope.Jumps2[*pc] = jump2
+
+		if jump2 > 3 {
+			//fmt.Printf("\t%06x BREAK\tJUMPI %5x times %d branch %v:%v\n", *pc, pos.Uint64(), jump2, interpreter.evm.depth, interpreter.evm.branchDepth+1)
 			return nil, ErrJumpiInfiniteLoop
 		}
 
-		// If cond is not known, need to follow both branches
-		// But if branch depth is too big, only follow non-zero branch
-		if interpreter.evm.branchDepth < RunBranchDepth {
-			interpreter.RunBranch(*pc + 1)
+		// If condition value is unknown, need to follow both branches
+		// But if branch depth is too deep or this branch is re-entered again, only follow non-zero branch
+		if interpreter.evm.branchDepth < RunBranchDepth && jump2 < 2 {
+			//fmt.Printf("\t%06x IN \tJUMPI %5x times %d branch %v:%v\n", *pc, pos.Uint64(), jump2, interpreter.evm.depth, interpreter.evm.branchDepth+1)
+			_, err := interpreter.RunBranch(*pc+1, scope)
+			//fmt.Printf("\t%06x OUT\tJUMPI %5x times %d branch %v:%v\n", *pc, pos.Uint64(), jump2, interpreter.evm.depth, interpreter.evm.branchDepth+1)
+			if errors.Is(err, ErrAbort) {
+				//fmt.Printf("Exit branch with timeout %v:%v\n", interpreter.evm.depth, interpreter.evm.branchDepth+1)
+				return nil, nil
+			}
 		}
-
+		if !scope.Contract.validJumpdest(&pos) {
+			return nil, ErrInvalidJump
+		}
 		*pc = pos.Uint64()
 	}
 	return nil, nil
@@ -1084,7 +1095,7 @@ func opReturn(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]b
 	return ret, nil
 }
 
-// The offset and size should be known in previous steps
+// The offset and size should be known in previous Steps
 func opRevert(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	offset, size := scope.Stack.pop(), scope.Stack.pop()
 	if offset.Eq(UnknownValuePlaceHolder) || size.Eq(UnknownValuePlaceHolder) {
