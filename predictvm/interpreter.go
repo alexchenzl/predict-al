@@ -269,7 +269,7 @@ func (in *EVMInterpreter) runOpCodes(pc uint64, callContext *ScopeContext) (ret 
 		in.evm.steps++
 		// return error to avoid running more branches
 		if in.evm.steps%1024 == 0 && atomic.LoadInt32(&in.evm.abort) != 0 {
-			//fmt.Printf("%08x Abort branch %d:%d at step %d\n", pc, in.evm.depth, in.evm.branchDepth, callContext.Steps)
+			//fmt.Printf("%08x:%08x Abort branch %d:%d\n", in.evm.steps, pc, in.evm.depth, in.evm.branchDepth)
 			return nil, ErrAbort
 		}
 		if in.cfg.Debug {
@@ -284,6 +284,7 @@ func (in *EVMInterpreter) runOpCodes(pc uint64, callContext *ScopeContext) (ret 
 		if operation == nil {
 			return nil, &ErrInvalidOpCode{opcode: op}
 		}
+		//fmt.Printf("%08x:%08x branch %d:%d op %v\n", in.evm.steps, pc, in.evm.depth, in.evm.branchDepth, op)
 		// Validate stack
 		if sLen := callContext.Stack.len(); sLen < operation.minStack {
 			return nil, &ErrStackUnderflow{stackLen: sLen, required: operation.minStack}

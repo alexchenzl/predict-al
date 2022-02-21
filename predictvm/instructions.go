@@ -755,7 +755,7 @@ func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]by
 		jump2++
 		scope.Jumps2[*pc] = jump2
 
-		if jump2 > 5 {
+		if jump2 > 4 {
 			//fmt.Printf("\t%06x BREAK\tJUMPI %5x times %d branch %v:%v\n", *pc, pos.Uint64(), jump2, interpreter.evm.depth, interpreter.evm.branchDepth+1)
 			return nil, ErrJumpiInfiniteLoop
 		}
@@ -768,7 +768,7 @@ func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]by
 			//fmt.Printf("\t%06x OUT\tJUMPI %5x times %d branch %v:%v\n", *pc, pos.Uint64(), jump2, interpreter.evm.depth, interpreter.evm.branchDepth+1)
 			if errors.Is(err, ErrAbort) {
 				//fmt.Printf("Exit branch with timeout %v:%v\n", interpreter.evm.depth, interpreter.evm.branchDepth+1)
-				return nil, nil
+				return nil, ErrAbort
 			}
 		}
 		if !scope.Contract.validJumpdest(&pos) {
