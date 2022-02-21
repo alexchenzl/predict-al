@@ -51,8 +51,6 @@ type ScopeContext struct {
 
 	// record the execution count of jumpi opcodes with fake condition values
 	Jumps2 map[uint64]int
-
-	Steps uint64
 }
 
 // keccakState wraps sha3.state. In addition to the usual hash methods, it also supports
@@ -191,7 +189,6 @@ func (in *EVMInterpreter) RunBranch(pc uint64, callContext *ScopeContext) (ret [
 			Contract: callContext.Contract,
 
 			Jumps2: jumps2,
-			Steps:  callContext.Steps,
 		}
 
 		curReturnData []byte
@@ -230,8 +227,6 @@ func (in *EVMInterpreter) RunBranch(pc uint64, callContext *ScopeContext) (ret [
 	curGas := callContext.Contract.Gas
 
 	defer func() {
-		callContext.Steps = newCallContext.Steps
-
 		callContext.Contract.Gas = curGas
 		if curReturnData != nil {
 			copy(in.returnData, curReturnData)
@@ -271,9 +266,9 @@ func (in *EVMInterpreter) runOpCodes(pc uint64, callContext *ScopeContext) (ret 
 	// the execution of one of the operations or until the done flag is set by the
 	// parent context.
 	for {
-		callContext.Steps++
+		in.evm.steps++
 		// return error to avoid running more branches
-		if callContext.Steps%1024 == 0 && atomic.LoadInt32(&in.evm.abort) != 0 {
+		if in.evm.steps%1024 == 0 && atomic.LoadInt32(&in.evm.abort) != 0 {
 			//fmt.Printf("%08x Abort branch %d:%d at step %d\n", pc, in.evm.depth, in.evm.branchDepth, callContext.Steps)
 			return nil, ErrAbort
 		}

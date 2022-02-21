@@ -123,6 +123,8 @@ type EVM struct {
 
 	// branchDepth is the depth of current JUMPI branch stack
 	branchDepth int
+
+	steps uint64
 }
 
 // NewEVM returns a new EVM. The returned EVM is not thread safe and should

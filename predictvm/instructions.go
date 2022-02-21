@@ -755,7 +755,7 @@ func opJumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]by
 		jump2++
 		scope.Jumps2[*pc] = jump2
 
-		if jump2 > 3 {
+		if jump2 > 5 {
 			//fmt.Printf("\t%06x BREAK\tJUMPI %5x times %d branch %v:%v\n", *pc, pos.Uint64(), jump2, interpreter.evm.depth, interpreter.evm.branchDepth+1)
 			return nil, ErrJumpiInfiniteLoop
 		}
