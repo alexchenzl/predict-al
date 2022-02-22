@@ -145,6 +145,10 @@ var (
 		Name:  "testnetwork",
 		Usage: "test RPC server access",
 	}
+	SummaryFlag = cli.BoolFlag{
+		Name:  "summary",
+		Usage: "Only output execution summary without information of every round if this flag is set",
+	}
 
 	OriginCommandHelpTemplate = `{{.Name}}{{if .Subcommands}} command{{end}}{{if .Flags}} [command options]{{end}} {{.ArgsUsage}}
 {{if .Description}}{{.Description}}
@@ -213,6 +217,7 @@ type TxPredictResult struct {
 	Ta int             `json:"ta"` // total accounts
 	Ts int             `json:"ts"` // total storage slots
 	Rd []TxRoundRecord `json:"rd"` // records of every round
+	Rb []int           `json:"rb"` // states to retrieve in every round
 	E  string          `json:"e,omitempty"`
 	St time.Duration   `json:"st"` // stats: execution time, in nanoseconds
 	Sa int64           `json:"sa"` // stats: The number of heap allocations during execution
@@ -266,7 +271,13 @@ func runCmd(ctx *cli.Context) error {
 	if err == nil {
 		results := make([]*TxPredictResult, 1)
 		results[0] = result
-		outputResults(ctx.GlobalString(OutFlag.Name), results)
+		filename := ctx.GlobalString(OutFlag.Name)
+		if len(filename) > 0 {
+			filename = fmt.Sprintf("%v.json", ctx.GlobalString(OutFlag.Name))
+		}
+		outputResults(filename, results)
+	} else {
+		fmt.Printf("Exist with error %v", err)
 	}
 	return err
 }
@@ -627,11 +638,14 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender 
 
 	txResult = &TxPredictResult{
 		Rd: make([]TxRoundRecord, 1, 2),
+		Rb: make([]int, 1, 2),
 	}
 	// Initial state accesses
 	txResult.Rd[0] = TxRoundRecord{
-		A: tracer.GetKnowAccounts(),
+		A: tracer.GetKnownAccounts(),
 	}
+	txResult.Rb[0] = len(txResult.Rd[0].A)
+
 	txResult.Ta = len(txResult.Rd[0].A)
 
 	creating := false
@@ -678,6 +692,7 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender 
 		txResult.Ta = txResult.Ta + accountNum
 		txResult.Ts = txResult.Ts + slotNum
 		txResult.Rd = append(txResult.Rd, roundResult)
+		txResult.Rb = append(txResult.Rb, accountNum+slotNum)
 
 		if runtimeConfig.Fetcher == nil || accountNum == 0 && slotNum == 0 || mr > 0 && tracer.Round >= mr || !tracer.HasMore {
 			break
@@ -708,9 +723,10 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender 
 			}
 		}
 
-		// Prepare for next round
 		runtimeConfig.Fetcher.Fetch(slotContractsToFetch, slotKeysToFetch, accountsToFetch)
 		runtimeConfig.State = runtimeConfig.Fetcher.CopyStatedb()
+
+		// Prepare for next round
 		tracer.AppendListToKnownList()
 		tracer.Touches = 0
 		tracer.Step = 0
@@ -719,6 +735,17 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender 
 
 	txResult.Tr = tracer.Round
 	txResult.Tt = tracer.Touches
+
+	if ctx.GlobalBool(SummaryFlag.Name) {
+		// merge all rounds' records into one record
+		tracer.AppendListToKnownList()
+		summaryResult := TxRoundRecord{
+			A: tracer.GetKnownAccounts(),
+			S: tracer.GetKnownStorageSlots(),
+		}
+		txResult.Rd[0] = summaryResult
+		txResult.Rd = txResult.Rd[0:1]
+	}
 	return txResult, nil
 }
 
@@ -733,7 +760,6 @@ func printResults(results []*TxPredictResult) {
 		} else {
 			fmt.Printf("\nTX %d\n", idx)
 		}
-		batches := make([]int, 0, len(result.Rd))
 		for idx2, round := range result.Rd {
 			fmt.Printf("\nRound %d\n", idx2)
 			batch := 0
@@ -755,7 +781,6 @@ func printResults(results []*TxPredictResult) {
 					batch += len(tuple.StorageKeys)
 				}
 			}
-			batches = append(batches, batch)
 		}
 		// Summary
 		fmt.Printf("\nSummary\n")
@@ -763,7 +788,7 @@ func printResults(results []*TxPredictResult) {
 		fmt.Printf("Total touches:        %d\n", result.Tt)
 		fmt.Printf("Total accounts:       %d\n", result.Ta)
 		fmt.Printf("Total storage slots:  %d\n", result.Ts)
-		fmt.Printf("Retrieval batches:    %v\n", batches)
+		fmt.Printf("Retrieval batches:    %v\n", result.Rb)
 		fmt.Printf("Execution time:       %v\n", result.St)
 		fmt.Printf("Allocations:          %v\n", result.Sa)
 		fmt.Printf("Bytes allocated:      %v\n", result.Sb)
@@ -817,6 +842,7 @@ func init() {
 		DisableStorageFlag,
 		DisableReturnDataFlag,
 		TestNetworkFlag,
+		SummaryFlag,
 	}
 
 	app.Action = runCmd

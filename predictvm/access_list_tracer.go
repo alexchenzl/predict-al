@@ -191,7 +191,7 @@ func (a *AccessListTracer) AppendListToKnownList() {
 	a.list = newAccessList()
 }
 
-func (a *AccessListTracer) GetKnowAccounts() []common.Address {
+func (a *AccessListTracer) GetKnownAccounts() []common.Address {
 	accounts := make([]common.Address, 0, len(a.knownList))
 	for addr := range a.knownList {
 		accounts = append(accounts, addr)
@@ -211,10 +211,18 @@ func (a *AccessListTracer) GetNewAccounts() []common.Address {
 	return accounts
 }
 
+func (a *AccessListTracer) GetKnownStorageSlots() types.AccessList {
+	return a.getStorageSlots(a.knownList)
+}
+
 // GetNewStorageSlots return new slots found in this round, in which new accounts are excluded
 func (a *AccessListTracer) GetNewStorageSlots() types.AccessList {
-	acl := make(types.AccessList, 0, len(a.list))
-	for addr, slots := range a.list {
+	return a.getStorageSlots(a.list)
+}
+
+func (*AccessListTracer) getStorageSlots(list accessList) types.AccessList {
+	acl := make(types.AccessList, 0, len(list))
+	for addr, slots := range list {
 		if len(slots) > 0 {
 			// Exclude accounts without storage slots
 			tuple := types.AccessTuple{Address: addr, StorageKeys: []common.Hash{}}
