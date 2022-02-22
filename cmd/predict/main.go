@@ -519,15 +519,16 @@ func runHistoryBlock(ctx *cli.Context, rpc string, blockNum *big.Int) ([]*TxPred
 	batchNum := txNum / batch
 
 	pos := 0
-	for i := 0; i < batchNum; i++ {
-		fmt.Fprintf(os.Stdout, "Block %v batch %d\n", block.Number().Int64(), i)
+	i := 0
+	for ; i < batchNum; i++ {
+		fmt.Fprintf(os.Stdout, "%v Block %v batch %d\n", time.Now().Format("2006-01-02 15:04:05"), block.Number().Int64(), i)
 		pos = batch * i
 		batchResult, _ := runBatch(ctx, rpc, chainConfig, bhCache, block, txs[pos:pos+batch])
 		results = append(results, batchResult...)
 	}
 	pos = batch * batchNum
 	if pos < txNum {
-		fmt.Fprintf(os.Stdout, "Block %v last batch\n", block.Number().Int64())
+		fmt.Fprintf(os.Stdout, "%v Block %v batch %d\n", time.Now().Format("2006-01-02 15:04:05"), block.Number().Int64(), i)
 		batchResult, _ := runBatch(ctx, rpc, chainConfig, bhCache, block, txs[pos:])
 		results = append(results, batchResult...)
 	}
