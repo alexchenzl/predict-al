@@ -14,6 +14,11 @@ var (
 	emptyRoot = common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
 )
 
+type Snapshot struct {
+	stateObjects map[common.Address]*stateObject
+	refund       uint64
+}
+
 // FakeStateDB structs within the ethereum protocol are used to store anything
 // within the merkle trie. StateDBs take care of caching and storing
 // nested states. It's the general query interface to retrieve:
@@ -25,16 +30,16 @@ type FakeStateDB struct {
 	// The refund counter, also used by state transitioning.
 	refund uint64
 
-	AccountUpdated int
-	StorageUpdated int
-	AccountDeleted int
-	StorageDeleted int
+	nextSnapshotId int
+	snapshots      map[int]*Snapshot
 }
 
 // New creates a new state from a given trie.
 func NewStateDB() *FakeStateDB {
 	sdb := &FakeStateDB{
-		stateObjects: make(map[common.Address]*stateObject),
+		stateObjects:   make(map[common.Address]*stateObject),
+		nextSnapshotId: 0,
+		snapshots:      make(map[int]*Snapshot),
 	}
 	return sdb
 }
@@ -115,7 +120,7 @@ func (s *FakeStateDB) GetBalance(addr common.Address) *big.Int {
 }
 
 func (s *FakeStateDB) SetBalance(addr common.Address, balance *big.Int) {
-	stateObject := s.getStateObject(addr)
+	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject.SetBalance(balance)
 	}
@@ -240,29 +245,38 @@ func (s *FakeStateDB) GetCommittedState(addr common.Address, hash common.Hash) c
 	return common.Hash{}
 }
 
-func (s *FakeStateDB) RevertToSnapshot(int) {
-
+func (s *FakeStateDB) RevertToSnapshot(id int) {
+	if snapshot, ok := s.snapshots[id]; ok {
+		stateObjects := make(map[common.Address]*stateObject, len(snapshot.stateObjects))
+		for key, value := range snapshot.stateObjects {
+			stateObjects[key] = value.deepCopy()
+		}
+		s.stateObjects = stateObjects
+		s.refund = snapshot.refund
+	}
 }
 
-// Snapshot
-// TODO - implement a simple snapshot-taking and reverting mechanism
 func (s *FakeStateDB) Snapshot() int {
-	return 0
+	snapshot := &Snapshot{
+		stateObjects: make(map[common.Address]*stateObject, len(s.stateObjects)),
+		refund:       s.refund,
+	}
+	for key, value := range s.stateObjects {
+		snapshot.stateObjects[key] = value.deepCopy()
+	}
+	s.snapshots[s.nextSnapshotId] = snapshot
+	s.nextSnapshotId++
+	return s.nextSnapshotId - 1
 }
 
-// Copy creates a deep, independent copy of the state.
+// Copy creates a deep, independent copy of the state, but not including snapshots
 func (s *FakeStateDB) Copy() *FakeStateDB {
 	// Copy all the basic fields, initialize the memory ones
 	state := &FakeStateDB{
-
-		stateObjects: make(map[common.Address]*stateObject, len(s.stateObjects)),
-
-		refund: s.refund,
-
-		AccountUpdated: s.AccountUpdated,
-		StorageUpdated: s.StorageUpdated,
-		AccountDeleted: s.AccountDeleted,
-		StorageDeleted: s.StorageDeleted,
+		stateObjects:   make(map[common.Address]*stateObject, len(s.stateObjects)),
+		refund:         s.refund,
+		nextSnapshotId: 0,
+		snapshots:      make(map[int]*Snapshot),
 	}
 	for key, value := range s.stateObjects {
 		state.stateObjects[key] = value.deepCopy()
