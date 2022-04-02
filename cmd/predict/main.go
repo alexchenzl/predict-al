@@ -277,7 +277,7 @@ func runCmd(ctx *cli.Context) error {
 		}
 		outputResults(filename, results)
 	} else {
-		fmt.Printf("Exist with error %v", err)
+		fmt.Printf("Exit with error: %v\n", err)
 	}
 	return err
 }
@@ -290,6 +290,7 @@ func runRawCodeLocally(ctx *cli.Context) (*TxPredictResult, error) {
 		genesisConfig = new(core.Genesis)
 	)
 
+	startTime := time.Now()
 	statedb := fakestate.NewStateDB()
 
 	if ctx.GlobalString(FromFlag.Name) != "" {
@@ -320,7 +321,7 @@ func runRawCodeLocally(ctx *cli.Context) (*TxPredictResult, error) {
 	if code == nil {
 		cli.ShowAppHelpAndExit(ctx, 1)
 	}
-	return runTx(ctx, &runtimeConfig, "", &from, &to, code, input)
+	return runTx(ctx, &runtimeConfig, "", &from, &to, code, input, startTime)
 }
 
 // runHistoryTransaction execute history transaction based on its parent block states
@@ -453,13 +454,6 @@ func runBatch(ctx *cli.Context, rpc string, chainConfig *params.ChainConfig, bhC
 		go func() {
 			defer pend.Done()
 
-			rpcClient, err := fakestate.DialContext(context.Background(), rpc)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error occured in runBatch %d: %v", block.Number().Int64(), err.Error())
-				return
-			}
-			defer rpcClient.Close()
-
 			for task := range jobs {
 				runtimeConfig := newRuntimeConfig(block.Header(), chainConfig, big.NewInt(int64(block.Time())), block.Number())
 				runtimeConfig.GetHashFn = bhCache.GetHashFn
@@ -470,7 +464,7 @@ func runBatch(ctx *cli.Context, rpc string, chainConfig *params.ChainConfig, bhC
 				hash := tx.Hash().Hex()
 
 				//fmt.Fprintf(os.Stdout, "task %v begin\n", hash)
-				res, err := runPredictTxTask(ctx, rpcClient, runtimeConfig, hash, &from, msg.To(), msg.Value(), msg.GasPrice(), msg.Gas(), msg.Data(), nil)
+				res, err := runPredictTxTask(ctx, nil, runtimeConfig, hash, &from, msg.To(), msg.Value(), msg.GasPrice(), msg.Gas(), msg.Data(), nil)
 				if err != nil {
 					results[task.index] = &TxPredictResult{H: hash, E: err.Error()}
 					fmt.Fprintf(os.Stderr, "task error %v:%v: %v\n", block.Number().Int64(), hash, err)
@@ -584,7 +578,16 @@ func parseCode(ctx *cli.Context) []byte {
 }
 
 func runPredictTxTask(ctx *cli.Context, rpcClient *fakestate.RpcClient, runtimeConfig *runtime.Config, hash string, from, to *common.Address, value, gasPrice *big.Int, gasLimit uint64, data, code []byte) (*TxPredictResult, error) {
-
+	startTime := time.Now()
+	if rpcClient == nil {
+		var err error
+		rpcClient, err = fakestate.DialContext(context.Background(), ctx.GlobalString(RpcFlag.Name))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error occured in runBatch %d: %v", runtimeConfig.BlockNumber.Int64(), err.Error())
+			return nil, err
+		}
+		defer rpcClient.Close()
+	}
 	stateDB := fakestate.NewStateDB()
 	// states need to be fetched from parent block
 	fetcher := fakestate.NewStateFetcher(stateDB, rpcClient, big.NewInt(runtimeConfig.BlockNumber.Int64()-1))
@@ -602,15 +605,14 @@ func runPredictTxTask(ctx *cli.Context, rpcClient *fakestate.RpcClient, runtimeC
 	runtimeConfig.Origin = *from
 	runtimeConfig.GasPrice = gasPrice
 	runtimeConfig.Value = value
-	return runTx(ctx, runtimeConfig, hash, from, to, code, data)
+	return runTx(ctx, runtimeConfig, hash, from, to, code, data, startTime)
 }
 
-func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender *common.Address, receiver *common.Address, code []byte, data []byte) (*TxPredictResult, error) {
+func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender *common.Address, receiver *common.Address, code []byte, data []byte, startTime time.Time) (*TxPredictResult, error) {
 
 	var txResult *TxPredictResult
 	var memStatsBefore goruntime.MemStats
 	goruntime.ReadMemStats(&memStatsBefore)
-	startTime := time.Now()
 
 	defer func() {
 		if txResult != nil {
@@ -665,8 +667,8 @@ func runTx(ctx *cli.Context, runtimeConfig *runtime.Config, hash string, sender 
 	go func() {
 		<-deadlineCtx.Done()
 		if deadlineCtx.Err() == context.DeadlineExceeded {
-			fmt.Fprintf(os.Stderr, "execution timeout %v\n", hash)
 			tracer.Stop(errors.New("execution timeout " + hash))
+			fmt.Fprintf(os.Stderr, "execution timeout %v\n", hash)
 		}
 	}()
 	defer cancel()
@@ -784,7 +786,7 @@ func printResults(results []*TxPredictResult) {
 		}
 		// Summary
 		fmt.Printf("\nSummary\n")
-		fmt.Printf("Total rounds:         %d\n", result.Tr)
+		fmt.Printf("Last round:           %d\n", result.Tr)
 		fmt.Printf("Total touches:        %d\n", result.Tt)
 		fmt.Printf("Total accounts:       %d\n", result.Ta)
 		fmt.Printf("Total storage slots:  %d\n", result.Ts)
