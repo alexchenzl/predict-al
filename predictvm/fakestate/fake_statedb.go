@@ -32,6 +32,7 @@ type FakeStateDB struct {
 
 	nextSnapshotId int
 	snapshots      map[int]*Snapshot
+	stateCache     *StateCache
 }
 
 // New creates a new state from a given trie.
@@ -42,6 +43,10 @@ func NewStateDB() *FakeStateDB {
 		snapshots:      make(map[int]*Snapshot),
 	}
 	return sdb
+}
+
+func (s *FakeStateDB) SetCache(cache *StateCache) {
+	s.stateCache = cache
 }
 
 // getStateObject retrieves a state object given by the address, returning nil if
@@ -144,6 +149,9 @@ func (s *FakeStateDB) SetNonce(addr common.Address, nonce uint64) {
 func (s *FakeStateDB) GetCodeHash(addr common.Address) common.Hash {
 	stateObject := s.getStateObject(addr)
 	if stateObject == nil {
+		if s.stateCache != nil {
+			return s.stateCache.GetCodeHash(addr)
+		}
 		return common.Hash{}
 	}
 	return common.BytesToHash(stateObject.CodeHash())
@@ -152,6 +160,9 @@ func (s *FakeStateDB) GetCode(addr common.Address) []byte {
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.Code()
+	}
+	if s.stateCache != nil {
+		return s.stateCache.GetCode(addr)
 	}
 	return nil
 }
@@ -166,6 +177,9 @@ func (s *FakeStateDB) GetCodeSize(addr common.Address) int {
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.CodeSize()
+	}
+	if s.stateCache != nil {
+		return s.stateCache.GetCodeSize(addr)
 	}
 	return -1
 }
@@ -190,8 +204,12 @@ func (s *FakeStateDB) GetState(addr common.Address, hash common.Hash) common.Has
 	if stateObject != nil {
 		return stateObject.GetState(hash)
 	}
+	if s.stateCache != nil {
+		return s.stateCache.GetState(addr, hash)
+	}
 	return common.Hash{}
 }
+
 func (s *FakeStateDB) SetState(addr common.Address, key, value common.Hash) {
 	stateObject := s.GetOrNewStateObject(addr)
 	if stateObject != nil {
@@ -226,13 +244,16 @@ func (s *FakeStateDB) HasSuicided(addr common.Address) bool {
 // Exist reports whether the given account address exists in the state.
 // Notably this also returns true for suicided accounts.
 func (s *FakeStateDB) Exist(addr common.Address) bool {
-	return s.getStateObject(addr) != nil
+	return s.getStateObject(addr) != nil || (s.stateCache != nil && s.stateCache.Exist(addr))
 }
 
 // Empty returns whether the given account is empty. Empty
 // is defined according to EIP161 (balance = nonce = code = 0).
-func (s *FakeStateDB) Empty(addr common.Address) bool {
+func (s *FakeStateDB) Empty(addr common.Address) (ret bool) {
 	so := s.getStateObject(addr)
+	if so == nil && s.stateCache != nil {
+		return s.stateCache.Empty(addr)
+	}
 	return so == nil || so.empty()
 }
 
@@ -277,6 +298,7 @@ func (s *FakeStateDB) Copy() *FakeStateDB {
 		refund:         s.refund,
 		nextSnapshotId: 0,
 		snapshots:      make(map[int]*Snapshot),
+		stateCache:     s.stateCache,
 	}
 	for key, value := range s.stateObjects {
 		state.stateObjects[key] = value.deepCopy()

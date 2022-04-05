@@ -45,8 +45,9 @@ type Config struct {
 	EVMConfig   vm.Config
 	BaseFee     *big.Int
 
-	State     *fakestate.FakeStateDB
-	GetHashFn func(n uint64) common.Hash
+	State      *fakestate.FakeStateDB
+	StateCache *fakestate.StateCache
+	GetHashFn  func(n uint64) common.Hash
 
 	Fetcher *fakestate.StateFetcher
 }

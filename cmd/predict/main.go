@@ -47,15 +47,24 @@ var (
 	}
 	OutFlag = cli.StringFlag{
 		Name:  "out",
-		Usage: "file to save prediction result",
+		Usage: "File to save prediction result",
+	}
+	CacheFileFlag = cli.StringFlag{
+		Name:  "cachefile",
+		Usage: "File containing contract addresses whose bytecodes need to be fetched as a cache",
+	}
+	CacheBlockFlag = cli.Int64Flag{
+		Name:  "cacheblock",
+		Usage: "Block height parameter for fetching the bytecodes to be cached",
+		Value: 13585500,
 	}
 	TxHashFlag = cli.StringFlag{
 		Name:  "tx",
-		Usage: "Hash of the history transaction to be executed",
+		Usage: "Hash of the historic transaction to be executed",
 	}
 	BlockFlag = cli.Int64Flag{
 		Name:  "block",
-		Usage: "Height of the history block within which all transactions contained will be executed. If tx is provided, block would be ignored",
+		Usage: "Height of the historic block within which all transactions contained will be executed. If tx is provided, block would be ignored",
 		Value: -1,
 	}
 	BatchFlag = cli.IntFlag{
@@ -205,6 +214,25 @@ func newRuntimeConfig(header *types.Header, chainConfig *params.ChainConfig, txT
 	return runtimeConfig
 }
 
+// Load recent last 256 block hashes
+func newBlockHashCache(client *fakestate.RpcClient, blockNumber *big.Int) (*fakestate.BlockHashCache, error) {
+	hashmap, err := client.GetRecentBlockHashes(context.Background(), blockNumber, 256)
+	if err != nil {
+		return nil, err
+	}
+	return fakestate.NewBlockHashCache(hashmap), nil
+}
+
+func newStateCache(client *fakestate.RpcClient, cacheFile string, blockNumber int64) *fakestate.StateCache {
+	if cacheFile != "" {
+		stateCache := fakestate.NewStateCache()
+		count := stateCache.Initialize(client, cacheFile, big.NewInt(blockNumber))
+		fmt.Printf("Initialize state cache with %v objects\n", count)
+		return stateCache
+	}
+	return nil
+}
+
 type txPredictTask struct {
 	tx    *types.Transaction
 	index int
@@ -324,7 +352,7 @@ func runRawCodeLocally(ctx *cli.Context) (*TxPredictResult, error) {
 	return runTx(ctx, &runtimeConfig, "", &from, &to, code, input, startTime)
 }
 
-// runHistoryTransaction execute history transaction based on its parent block states
+// runHistoryTransaction execute historic transaction based on its parent block states
 // If it's a pending transaction, use the latest block header to create runtime configuration
 func runHistoryTransaction(ctx *cli.Context, rpc string, txHash string) (*TxPredictResult, error) {
 
@@ -335,7 +363,7 @@ func runHistoryTransaction(ctx *cli.Context, rpc string, txHash string) (*TxPred
 	}
 	defer rpcClient.Close()
 
-	// If txHash is provided, execute the history transaction, but it is also may be a pending tx
+	// If txHash is provided, execute the historic transaction, but it also may be a pending tx
 	tx, pending, err := rpcClient.GetTransactionByHash(rpcCtx, common.HexToHash(txHash))
 	if err != nil {
 		return nil, err
@@ -368,12 +396,18 @@ func runHistoryTransaction(ctx *cli.Context, rpc string, txHash string) (*TxPred
 	}
 
 	// Load recent 256 block hashes
-	hashmap, err := rpcClient.GetRecentBlockHashes(rpcCtx, parentBlockNum, 256)
-	bhCache := fakestate.NewBlockHashCache(hashmap)
+	//hashmap, err := rpcClient.GetRecentBlockHashes(rpcCtx, parentBlockNum, 256)
+	//bhCache := fakestate.NewBlockHashCache(hashmap)
+	bhCache, err := newBlockHashCache(rpcClient, parentBlockNum)
+	if err != nil {
+		return nil, err
+	}
+	stateCache := newStateCache(rpcClient, ctx.GlobalString(CacheFileFlag.Name), ctx.GlobalInt64(CacheBlockFlag.Name))
 
 	chainConfig := newChainConfig(rpcClient)
 	runtimeConfig := newRuntimeConfig(header, chainConfig, big.NewInt(txTime), txBlockNum)
 	runtimeConfig.GetHashFn = bhCache.GetHashFn
+	runtimeConfig.StateCache = stateCache
 
 	hash := tx.Tx.Hash().Hex()
 	result, err := runPredictTxTask(ctx, rpcClient, runtimeConfig, hash, tx.From, tx.Tx.To(), tx.Tx.Value(), tx.Tx.GasPrice(), tx.Tx.Gas(), tx.Tx.Data(), nil)
@@ -437,7 +471,7 @@ func runNewTransaction(ctx *cli.Context, rpc string) (*TxPredictResult, error) {
 	return runPredictTxTask(ctx, rpcClient, runtimeConfig, "", from, to, value, price, gasLimit, input, code)
 }
 
-func runBatch(ctx *cli.Context, rpc string, chainConfig *params.ChainConfig, bhCache *fakestate.BlockHashCache, block *types.Block, txs []*types.Transaction) ([]*TxPredictResult, error) {
+func runBatch(ctx *cli.Context, rpc string, chainConfig *params.ChainConfig, bhCache *fakestate.BlockHashCache, stateCache *fakestate.StateCache, block *types.Block, txs []*types.Transaction) ([]*TxPredictResult, error) {
 	var (
 		signer  = types.MakeSigner(chainConfig, block.Number())
 		results = make([]*TxPredictResult, len(txs))
@@ -457,6 +491,7 @@ func runBatch(ctx *cli.Context, rpc string, chainConfig *params.ChainConfig, bhC
 			for task := range jobs {
 				runtimeConfig := newRuntimeConfig(block.Header(), chainConfig, big.NewInt(int64(block.Time())), block.Number())
 				runtimeConfig.GetHashFn = bhCache.GetHashFn
+				runtimeConfig.StateCache = stateCache
 
 				tx := task.tx
 				msg, _ := tx.AsMessage(signer, block.BaseFee())
@@ -513,9 +548,11 @@ func runHistoryBlock(ctx *cli.Context, rpc string, blockNum *big.Int) ([]*TxPred
 	}
 
 	chainConfig := newChainConfig(rpcClient)
-	// Load recent last 256 block hashes
-	hashmap, err := rpcClient.GetRecentBlockHashes(rpcCtx, big.NewInt(block.Number().Int64()-1), 256)
-	bhCache := fakestate.NewBlockHashCache(hashmap)
+	bhCache, err := newBlockHashCache(rpcClient, big.NewInt(block.Number().Int64()-1))
+	if err != nil {
+		return nil, err
+	}
+	stateCache := newStateCache(rpcClient, ctx.GlobalString(CacheFileFlag.Name), ctx.GlobalInt64(CacheBlockFlag.Name))
 
 	// Execute all the transaction contained within the block concurrently
 	results := make([]*TxPredictResult, 0, txNum)
@@ -528,13 +565,13 @@ func runHistoryBlock(ctx *cli.Context, rpc string, blockNum *big.Int) ([]*TxPred
 	for ; i < batchNum; i++ {
 		fmt.Fprintf(os.Stdout, "%v Block %v batch %d\n", time.Now().Format("2006-01-02 15:04:05"), block.Number().Int64(), i)
 		pos = batch * i
-		batchResult, _ := runBatch(ctx, rpc, chainConfig, bhCache, block, txs[pos:pos+batch])
+		batchResult, _ := runBatch(ctx, rpc, chainConfig, bhCache, stateCache, block, txs[pos:pos+batch])
 		results = append(results, batchResult...)
 	}
 	pos = batch * batchNum
 	if pos < txNum {
 		fmt.Fprintf(os.Stdout, "%v Block %v batch %d\n", time.Now().Format("2006-01-02 15:04:05"), block.Number().Int64(), i)
-		batchResult, _ := runBatch(ctx, rpc, chainConfig, bhCache, block, txs[pos:])
+		batchResult, _ := runBatch(ctx, rpc, chainConfig, bhCache, stateCache, block, txs[pos:])
 		results = append(results, batchResult...)
 	}
 	return results, err
@@ -589,6 +626,9 @@ func runPredictTxTask(ctx *cli.Context, rpcClient *fakestate.RpcClient, runtimeC
 		defer rpcClient.Close()
 	}
 	stateDB := fakestate.NewStateDB()
+	if runtimeConfig.StateCache != nil {
+		stateDB.SetCache(runtimeConfig.StateCache)
+	}
 	// states need to be fetched from parent block
 	fetcher := fakestate.NewStateFetcher(stateDB, rpcClient, big.NewInt(runtimeConfig.BlockNumber.Int64()-1))
 
@@ -822,6 +862,8 @@ func outputResults(filename string, results []*TxPredictResult) error {
 
 func init() {
 	app.Flags = []cli.Flag{
+		CacheFileFlag,
+		CacheBlockFlag,
 		RpcFlag,
 		OutFlag,
 		TxHashFlag,
