@@ -42,7 +42,7 @@ func (s *StateCache) Initialize(rc *RpcClient, cacheFile string, blockNumber *bi
 				accountsToFetch = append(accountsToFetch, common.HexToAddress(arr[0]))
 			} else if len(arr) == 2 {
 				slotContractsToFetch = append(slotContractsToFetch, common.HexToAddress(arr[0]))
-				slotKeysToFetch = append(slotKeysToFetch, common.HexToHash(arr[0]))
+				slotKeysToFetch = append(slotKeysToFetch, common.HexToHash(arr[1]))
 			}
 		}
 
