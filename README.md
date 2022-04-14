@@ -1,7 +1,7 @@
 # predict_al
 Prototype to predict Ethereum transactions' access lists. The project comes from [CDAP cohort-one](https://github.com/ethereum-cdap/cohort-one/issues/26).
 
-Applying methodology like [taint checking](https://en.wikipedia.org/wiki/Taint_checking), the prototype, when tested with about one million historic transactions on 
+Applying methodology like [taint checking](https://en.wikipedia.org/wiki/Taint_checking), the prototype, when tested with about one million historical transactions on 
 Ethereum Mainnet, achieves an average improvement of 2.448x on reducing the number of iterations to retrieve state from the network.
 
 [This post](https://ethresear.ch/t/predicting-access-list-a-potential-way-to-speed-up-the-evm-for-portal-clients/12355) explains how this tool works and how it has been tested in detail.
