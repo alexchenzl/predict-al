@@ -25,6 +25,7 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
+// It means a tainted value
 var UnknownValuePlaceHolder, _ = uint256.FromHex("0xFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFCFC")
 
 func opAdd(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
