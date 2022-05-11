@@ -4,7 +4,7 @@ Prototype to predict Ethereum transactions' access lists. The project comes from
 Applying methodology like [taint checking](https://en.wikipedia.org/wiki/Taint_checking), the prototype, when tested with about one million historical transactions on 
 Ethereum Mainnet, achieves an average improvement of 2.448x on reducing the number of iterations to retrieve state from the network.
 
-[This post](https://ethresear.ch/t/predicting-access-list-a-potential-way-to-speed-up-the-evm-for-portal-clients/12355) explains how this tool works and how it has been tested in detail.
+[This post](https://hackmd.io/5i1rtSrrTZWEQLxN7ePt4w) explains how this tool works and how it has been tested in detail.
 
 
 ## Building
